@@ -23,7 +23,7 @@ from typing import Iterable, Optional
 
 import requests
 from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import (
     QGraphicsItem, QGraphicsPixmapItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
     QLabel, QToolButton,
@@ -57,12 +57,12 @@ COLOR_BORDER = QColor(230, 235, 240, 150)
 COLOR_COUNTRY = QColor(200, 210, 220, 150)
 COLOR_AVAILABLE = QColor(40, 130, 255, 22)
 # Tile colours by best available elevation source: green = excellent,
-# blue = good, grey = satellite data only.
+# blue = good, red = satellite data only.
 COLOR_QUALITY = {
     LIDAR: QColor(30, 200, 80, 115),
     USGS: QColor(30, 200, 80, 115),
     NATIONAL: QColor(40, 120, 255, 105),
-    FABDEM: QColor(120, 120, 125, 120),
+    FABDEM: QColor(225, 55, 55, 95),
 }
 RATING = {LIDAR: "BEST", USGS: "BEST", NATIONAL: "GOOD", FABDEM: "BASIC"}
 COLOR_INSTALLED = QColor(255, 140, 0)
@@ -70,9 +70,9 @@ COLOR_CACHED = QColor(235, 245, 255, 230)
 LEGEND = (
     (QColor(30, 200, 80), "■", "<b>Best</b> - LiDAR 1-5 m (Sonny / USGS 3DEP)"),
     (QColor(40, 120, 255), "■", "<b>Good</b> - national model 10-50 m"),
-    (QColor(150, 150, 155), "■", "<b>Basic</b> - satellite 30 m (FABDEM)"),
-    (COLOR_INSTALLED, "■", "<b>Already installed</b>"),
-    (COLOR_CACHED, "⬚", "Elevation data downloaded"),
+    (QColor(225, 55, 55), "■", "<b>Basic</b> - satellite 30 m (FABDEM)"),
+    (COLOR_INSTALLED, "■", "<b>✓ Already installed</b>"),
+    (COLOR_CACHED, "⬚", "Data downloaded, not built yet"),
 )
 # pixels the mouse may move before a left click becomes a drag (pan)
 CLICK_SLOP = 5
@@ -389,9 +389,11 @@ class TileMap(QGraphicsView):
     def _tile_loaded(self, z: int, x: int, y: int, data: bytes) -> None:
         if (z, x, y) in self._base_items:
             return
-        pixmap = QPixmap()
-        if not pixmap.loadFromData(data):
+        image = QImage()
+        if not image.loadFromData(data):
             return
+        # grey base map: the quality colours on top stay easy to tell apart
+        pixmap = QPixmap.fromImage(image.convertToFormat(QImage.Format_Grayscale8))
         item = QGraphicsPixmapItem(pixmap)
         item.setTransformationMode(Qt.SmoothTransformation)
         scale = WORLD / 2 ** z / pixmap.width()
@@ -448,24 +450,42 @@ class TileMap(QGraphicsView):
         for item in self._inventory_items:
             self._scene.removeItem(item)
         self._inventory_items = []
-        cached_pen = QPen(COLOR_CACHED, 1.3)
-        cached_pen.setStyle(Qt.DotLine)
+        # dark line under a white dashed one: visible on light and dark maps
+        under = QPen(QColor(10, 15, 20, 200), 4)
+        under.setCosmetic(True)
+        cached_pen = QPen(COLOR_CACHED, 2)
+        cached_pen.setStyle(Qt.DashLine)
         cached_pen.setCosmetic(True)
         for tile in inventory.cached:
             if tile in inventory.installed:
                 continue
-            item = self._scene.addRect(tile_rect(*tile).adjusted(4, 4, -4, -4), cached_pen)
-            item.setZValue(3.4)
-            self._inventory_items.append(item)
-        installed_pen = QPen(COLOR_INSTALLED, 2.5)
+            for pen, z in ((under, 3.4), (cached_pen, 3.41)):
+                item = self._scene.addRect(tile_rect(*tile).adjusted(5, 5, -5, -5), pen)
+                item.setZValue(z)
+                self._inventory_items.append(item)
+        check_font = QFont()
+        check_font.setPointSize(13)
+        check_font.setBold(True)
+        installed_pen = QPen(COLOR_INSTALLED, 3)
         installed_pen.setCosmetic(True)
         fill = QColor(COLOR_INSTALLED)
-        fill.setAlpha(165)
+        fill.setAlpha(190)
         for tile in inventory.installed:
             item = self._scene.addRect(tile_rect(*tile).adjusted(1.5, 1.5, -1.5, -1.5), installed_pen,
                                        QBrush(fill))
             item.setZValue(3.2)  # below the selection outline
             self._inventory_items.append(item)
+            mark = QGraphicsSimpleTextItem("✓")
+            mark.setFont(check_font)
+            mark.setBrush(QBrush(QColor(255, 255, 255)))
+            mark.setPen(QPen(QColor(90, 45, 0), 0.6))
+            mark.setFlag(QGraphicsItem.ItemIgnoresTransformations)
+            box = mark.boundingRect()
+            mark.setTransform(QTransform.fromTranslate(-box.width() / 2, -box.height() / 2))
+            mark.setPos(tile_rect(*tile).center())
+            mark.setZValue(3.6)
+            self._scene.addItem(mark)
+            self._inventory_items.append(mark)
         self._refresh()
 
     def set_quality_view(self, strong: bool) -> None:

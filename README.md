@@ -69,10 +69,11 @@ very visible.
    The map works like any web map: drag to move, mouse wheel or **+/−** to zoom, click a tile
    to (de)select it, **Shift+drag** selects many tiles, right-drag removes them.
    Tile colours show the data quality: **green** = LiDAR (best), **blue** = national model (good),
-   **grey** = satellite only (basic); *Highlight data quality* makes them stand out.
+   **red** = satellite only (basic); *Highlight data quality* makes them stand out.
    **Orange** tiles are already installed (by any pack of this app, also next to XPME),
-   **dotted** tiles have their elevation data downloaded already. Below the map the app
-   counts how many selected tiles are installed and missing — *Select only missing tiles*
+   **dashed** tiles have their elevation data downloaded but are not built yet. The
+   background map is shown in grey so the colours are easy to tell apart. Below the map the app
+   counts how many selected tiles are installed and not built yet, and which data quality they get — *Select only missing tiles*
    keeps just the ones you still need. If you build into a pack that already contains some
    of the selected tiles, the app asks whether to build only the new tiles or replace them.
 4. **Method & resolution** — keep *Improve my current terrain*, choose 1″ (≈30 m) or 3″ (≈90 m).
@@ -121,7 +122,7 @@ very visible.
 | Method | **Improve** · **New mesh** | See above. |
 | DEM resolution | **1″** (≈30 m) · **3″** (≈90 m) | 3″ is resampled from Sonny's 1″ data (3×3 mean). |
 | Mesh detail (new mesh only) | **Balanced** · **High** · **Maximum** | Ortho4XP `curvature_tol` 2.0 / 1.2 / 0.8 and `limit_tris` 3 / 4 / 5 M triangles per tile. |
-| Tiles in parallel | 1 – 8 | Each worker needs about 2–3 GB of RAM (measured: 2.0 GB peak for a 1″ *Maximum* tile with 4.5 M triangles). |
+| Tiles at the same time | Automatic / 1 – 8 | *Automatic* picks the best value from CPU threads and RAM (about 2 GB per tile for *improve*, 3 GB for *new mesh*, 4 GB kept free). |
 | Own Sonny DTM folder | optional | Point it at `.hgt` or `.zip` files you downloaded from sonny.4lima.de (e.g. newer country releases). Missing tiles are downloaded automatically. |
 
 ## Elevation data sources

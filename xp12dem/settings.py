@@ -15,10 +15,11 @@ class Settings:
     install_target: str = "autoortho"  # or "custom_scenery" (rebuild only)
     resolution: str = "1"
     mesh_detail: str = "high"
-    parallel: int = 1
+    parallel: int = 0  # 0 = automatic (recommended for this PC)
     local_dem_folder: str = ""
     last_region: str = "tyrol"
     custom_tiles: list = field(default_factory=list)
+    parallel_choice: bool = True  # marks settings written with the "automatic" option
 
     @classmethod
     def load(cls) -> "Settings":
@@ -27,6 +28,8 @@ class Settings:
         except (OSError, ValueError):
             return cls()
         known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        if "parallel_choice" not in data:  # before 0.1.1 parallel defaulted to 1 - switch to automatic
+            known["parallel"] = 0
         return cls(**known)
 
     def save(self) -> None:

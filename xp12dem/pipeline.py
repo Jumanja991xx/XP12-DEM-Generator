@@ -415,7 +415,11 @@ class Pipeline:
             "source": {"kind": source.kind, "name": source.name, "dsf": str(source.dsf),
                        "read_root": str(source.read_root)},
             "runways": [[r.lat1, r.lon1, r.lat2, r.lon2, r.half_width] for r in runways],
-            "feather": {side: nb not in selected for side, nb in neighbours.items()},
+            # blend into the original terrain towards tiles that are not rebuilt now,
+            # and towards tiles whose elevation comes from a different source
+            # (their edge heights would not match exactly)
+            "feather": {side: nb not in selected or self.dem_sources.get(nb) != self.dem_sources.get(tile)
+                        for side, nb in neighbours.items()},
         }
         self.events.log(f"{name}: improving {source.label}")
         return self._run_worker(tile, job, build_dir)

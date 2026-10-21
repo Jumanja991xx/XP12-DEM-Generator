@@ -30,6 +30,7 @@ def _cli_build(argv: list[str]) -> int:
     from . import regions
     from .installer import InstallTarget
     from .pipeline import BuildRequest, Events, MESH_DETAILS, Pipeline
+    from .system import recommended_parallel
     from .xplane import find_xplane12_installs, read_autoortho_config
 
     parser = argparse.ArgumentParser(prog="xp12dem build", description="Build and install a DEM mesh pack.")
@@ -47,7 +48,7 @@ def _cli_build(argv: list[str]) -> int:
     parser.add_argument("--target", choices=["autoortho", "custom_scenery"], default="autoortho",
                         help="where a 'rebuild' pack goes ('improve' always uses Custom Scenery)")
     parser.add_argument("--dem-folder", type=Path, help="folder with your own Sonny .hgt/.zip files")
-    parser.add_argument("--parallel", type=int, default=1)
+    parser.add_argument("--parallel", type=int, default=0, help="tiles at once (0 = automatic)")
     parser.add_argument("--no-install", action="store_true", help="only build, keep the pack in the work folder")
     args = parser.parse_args(argv)
 
@@ -72,7 +73,7 @@ def _cli_build(argv: list[str]) -> int:
     request = BuildRequest(tiles=tiles, region_name=name, slug=regions.slugify(name),
                            resolution_key=args.resolution, mesh_key=args.mesh, xplane=xplane,
                            target=target, local_dem_source=args.dem_folder,
-                           parallel=args.parallel, install=not args.no_install,
+                           parallel=args.parallel or recommended_parallel(args.method), install=not args.no_install,
                            method=args.method, extra_roots=extra_roots)
     class CliEvents(Events):
         last = -1e9

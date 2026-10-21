@@ -12,7 +12,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QRadioButton, QSpinBox, QSplitter, QStackedWidget,
     QVBoxLayout, QWidget,
@@ -248,9 +248,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(_title("1  Choose a region"))
         layout.addWidget(_hint("Pick a preset or click 1°×1° tiles on the map. Drag to move the map, "
                                "mouse wheel or +/− to zoom, Shift+drag selects many tiles, right-drag "
-                               "removes them. Green = LiDAR (best), blue = national model, grey = satellite "
-                               "only. <b style='color:#ff8c00'>Orange</b> tiles are already installed, "
-                               "dotted ones already downloaded."))
+                               "removes them. Green = LiDAR (best), blue = national model, red = satellite "
+                               "only. <b style='color:#ff8c00'>Orange ✓</b> tiles are already installed; "
+                               "dashed ones have their data downloaded but are not built yet."))
         splitter = QSplitter(Qt.Horizontal)
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -375,13 +375,32 @@ class MainWindow(QMainWindow):
                 f"You have <b>{total}</b> tile(s) installed in {len(inv.packs)} pack(s)." if total
                 else "Nothing installed yet.")
         else:
+            from ..dem_sources import FABDEM, LIDAR, NATIONAL, USGS, coverage
+
             packs = sorted({p.name for t in installed for p in inv.installed[t]})
             text = f"Selection: <b>{len(tiles)}</b> tile(s) · "
-            text += (f"<span style='color:#50ff8c'>✔ {len(installed)} already installed</span>"
-                     f" ({', '.join(packs[:3])}{'…' if len(packs) > 3 else ''}) · " if installed else "")
-            text += f"<b>{len(missing)} missing</b>"
+            if installed:
+                text += (f"<span style='color:#ff9a1f'>✓ {len(installed)} already installed</span>"
+                         f" ({', '.join(packs[:3])}{'…' if len(packs) > 3 else ''}) · ")
+            text += f"<b>{len(missing)} not built yet</b>"
             if downloaded:
-                text += f" ({len(downloaded)} of them already downloaded)"
+                text += f" (elevation data for {len(downloaded)} of them already downloaded)"
+            # which data the selection gets - every tile uses its own best source
+            counts: dict[str, int] = {}
+            for tile in tiles:
+                info = coverage().get(tile)
+                rating = {LIDAR: "best", USGS: "best", NATIONAL: "good", FABDEM: "basic"}.get(
+                    info.quality if info else "", "basic")
+                counts[rating] = counts.get(rating, 0) + 1
+            colours = {"best": "#3ad070", "good": "#5a9bff", "basic": "#ff6b6b"}
+            names = {"best": "Best (LiDAR)", "good": "Good (national model)", "basic": "Basic (satellite)"}
+            mix = ", ".join(f"<span style='color:{colours[r]}'>{counts[r]} × {names[r]}</span>"
+                            for r in ("best", "good", "basic") if r in counts)
+            text += f"<br>Elevation data: {mix}"
+            if len(counts) > 1:
+                text += " - every tile automatically gets its own best data"
+                if not hasattr(self, "method_cards") or self._method_key() == "improve":
+                    text += ", tile edges blend smoothly into each other"
             self.have_label.setText(text)
         self.missing_btn.setEnabled(bool(tiles) and bool(installed) and bool(missing))
         self.installed_btn.setEnabled(bool(inv.installed))
@@ -519,12 +538,15 @@ class MainWindow(QMainWindow):
 
         advanced = QGroupBox("Advanced (optional)")
         grid = QGridLayout(advanced)
-        grid.addWidget(QLabel("Tiles built in parallel"), 0, 0)
-        self.parallel_spin = QSpinBox()
-        self.parallel_spin.setRange(1, max(1, min(8, (os.cpu_count() or 2) // 2)))
-        self.parallel_spin.valueChanged.connect(lambda *_: self._update_status())
-        grid.addWidget(self.parallel_spin, 0, 1)
-        grid.addWidget(_hint("Each parallel tile needs about 2-3 GB of RAM."), 0, 2)
+        grid.addWidget(QLabel("Tiles built at the same time"), 0, 0)
+        self.parallel_combo = QComboBox()
+        self.parallel_combo.addItem("Automatic (recommended)", 0)
+        for n in range(1, 9):
+            self.parallel_combo.addItem(f"{n} at a time", n)
+        self.parallel_combo.currentIndexChanged.connect(lambda *_: self._parallel_changed())
+        grid.addWidget(self.parallel_combo, 0, 1)
+        self.parallel_hint = _hint("")
+        grid.addWidget(self.parallel_hint, 0, 2)
         grid.addWidget(QLabel("Own Sonny DTM folder"), 1, 0)
         folder_row = QHBoxLayout()
         self.dem_folder_edit = QLineEdit()
@@ -559,6 +581,8 @@ class MainWindow(QMainWindow):
         for card in self.mesh_cards:
             card.setEnabled(rebuild)
         self.mesh_label.setEnabled(rebuild)
+        if hasattr(self, "parallel_hint"):
+            self._parallel_changed()  # the recommendation depends on the method
         self._update_status()
 
     def _res_key(self) -> str:
@@ -762,18 +786,37 @@ class MainWindow(QMainWindow):
                      "non-commercial licence - fine for private use</span>")
         return text
 
+    def _parallel(self) -> int:
+        """Tiles to build at once - the automatic choice depends on CPU, RAM and method."""
+        from ..system import recommended_parallel
+
+        chosen = self.parallel_combo.currentData() if hasattr(self, "parallel_combo") else 0
+        return chosen or recommended_parallel(self._method_key())
+
+    def _parallel_changed(self) -> None:
+        from ..system import total_ram_gb
+
+        ram = total_ram_gb()
+        machine = f"{os.cpu_count() or '?'} CPU threads" + (f", {ram:.0f} GB RAM" if ram else "")
+        if not self.parallel_combo.currentData():
+            self.parallel_hint.setText(f"{self._parallel()} at a time for this PC ({machine}). "
+                                       "Each tile needs about 2-3 GB of RAM.")
+        else:
+            self.parallel_hint.setText(f"This PC: {machine}. Each tile needs about 2-3 GB of RAM.")
+        self._update_status()
+
     def _minutes(self, count: int) -> float:
         from ..eta import TimingHistory, build_key
 
         measured = TimingHistory(paths.data_root() / "timings.json").typical(
             build_key(self._method_key(), self._res_key(), self._mesh_key()))
         if measured:  # real build times on this PC
-            return measured / 60 * count / max(1, self.parallel_spin.value())
+            return measured / 60 * count / max(1, self._parallel())
         if self._method_key() == "improve":
             per_tile = _IMPROVE_MINUTES[self._res_key()]
         else:
             per_tile = _MINUTES[(self._res_key(), self._mesh_key())]
-        return per_tile * count / max(1, self.parallel_spin.value())
+        return per_tile * count / max(1, self._parallel())
 
     def _sources_preview(self, tiles) -> str:
         """Which terrain each tile currently uses (shown before building)."""
@@ -832,7 +875,7 @@ class MainWindow(QMainWindow):
             resolution_key=self._res_key(), mesh_key=self._mesh_key(), xplane=self.xplane,
             target=target,
             local_dem_source=Path(self.dem_folder_edit.text()) if self.dem_folder_edit.text().strip() else None,
-            parallel=self.parallel_spin.value(), method=self._method_key(),
+            parallel=self._parallel(), method=self._method_key(),
             extra_roots=self._extra_roots())
         if not retry:
             self._refresh_inventory()
@@ -1050,7 +1093,8 @@ class MainWindow(QMainWindow):
             card.radio.setChecked(card.key == s.resolution)
         for card in self.mesh_cards:
             card.radio.setChecked(card.key == s.mesh_detail)
-        self.parallel_spin.setValue(max(1, s.parallel))
+        index = self.parallel_combo.findData(max(0, min(8, s.parallel)))
+        self.parallel_combo.setCurrentIndex(max(0, index))
         self.dem_folder_edit.setText(s.local_dem_folder)
         (self.target_cs if s.install_target == "custom_scenery" else self.target_ao).setChecked(True)
         for card in self.method_cards:
@@ -1065,7 +1109,7 @@ class MainWindow(QMainWindow):
         s.xplane_path = str(self.xplane or "")
         s.resolution = self._res_key()
         s.mesh_detail = self._mesh_key()
-        s.parallel = self.parallel_spin.value()
+        s.parallel = int(self.parallel_combo.currentData() or 0)
         s.local_dem_folder = self.dem_folder_edit.text().strip()
         s.install_target = "autoortho" if self.target_ao.isChecked() else "custom_scenery"
         s.method = self._method_key()
@@ -1080,7 +1124,7 @@ class MainWindow(QMainWindow):
 
     def _update_status(self, *_args) -> None:
         tiles = self.map.selected() if hasattr(self, "map") else []
-        if not hasattr(self, "mesh_cards") or not hasattr(self, "parallel_spin"):
+        if not hasattr(self, "mesh_cards") or not hasattr(self, "parallel_combo"):
             return
         minutes = self._minutes(len(tiles))
         self.status_label.setText(

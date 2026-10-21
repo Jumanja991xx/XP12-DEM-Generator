@@ -62,14 +62,24 @@ QProgressBar { border: 1px solid #2c3a49; border-radius: 6px; background: #0e141
 QProgressBar::chunk { background: #f0a030; border-radius: 5px; }
 QSplitter::handle { background: #141b22; }
 QToolTip { background: #24303d; color: #e6edf3; border: 1px solid #34465a; }
+QComboBox { background: #24303d; border: 1px solid #4a5d70; border-radius: 6px; padding: 6px 30px 6px 10px; }
+QComboBox:hover { border-color: #f0a030; }
+QComboBox::drop-down { border: none; width: 26px; }
+QComboBox::down-arrow { image: url("ARROW"); width: 10px; height: 6px; }
+QComboBox QAbstractItemView { background: #1b2530; border: 1px solid #4a5d70;
+              selection-background-color: #3a2f1a; selection-color: #ffd28a; outline: 0; }
 """
+
+
+def stylesheet() -> str:
+    return STYLE.replace("ARROW", (resources_dir() / "arrow_down.png").as_posix())
 
 
 def run() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
-    app.setStyleSheet(STYLE)
+    app.setStyleSheet(stylesheet())
     icon = resources_dir() / "icon.png"
     if icon.is_file():
         app.setWindowIcon(QIcon(str(icon)))
