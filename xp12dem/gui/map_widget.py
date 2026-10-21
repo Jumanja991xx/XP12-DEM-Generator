@@ -68,8 +68,8 @@ RATING = {LIDAR: "BEST", USGS: "BEST", NATIONAL: "GOOD", FABDEM: "BASIC"}
 COLOR_INSTALLED = QColor(255, 140, 0)
 COLOR_CACHED = QColor(235, 245, 255, 230)
 LEGEND = (
-    (QColor(30, 200, 80), "■", "<b>Best</b> - LiDAR 1-5 m (Sonny / USGS 3DEP)"),
-    (QColor(40, 120, 255), "■", "<b>Good</b> - national model 10-50 m"),
+    (QColor(30, 200, 80), "■", "<b>Best</b> - LiDAR (Sonny, USGS, LINZ, NRCan)"),
+    (QColor(40, 120, 255), "■", "<b>Good</b> - national 5-50 m model, ArcticDEM"),
     (QColor(225, 55, 55), "■", "<b>Basic</b> - satellite 30 m (FABDEM)"),
     (COLOR_INSTALLED, "■", "<b>✓ Already installed</b>"),
     (COLOR_CACHED, "⬚", "Data downloaded, not built yet"),
@@ -78,8 +78,14 @@ LEGEND = (
 CLICK_SLOP = 5
 VIEWS = {
     "Europe": (-12, 66, 32, 36),
+    "Alps": (5, 48.6, 16.5, 43.6),
     "USA": (-126, 50, -66, 24),
     "Alaska & Hawaii": (-170, 68, -140, 18),
+    "Canada": (-141, 72, -52, 42),
+    "New Zealand": (165, -34, 179, -47.5),
+    "Japan": (128, 46, 146, 30),
+    "Iceland & Greenland": (-75, 82, -12, 59),
+    "Australia": (112, -10, 155, -44),
     "World": (-170, 75, 180, -50),
 }
 COLOR_GRID = QColor(70, 110, 160, 130)
@@ -501,8 +507,11 @@ class TileMap(QGraphicsView):
         parts = [f"Tile {tile_name(*tile)}"]
         if tile in self._selected:
             parts.append("selected")
-        parts.append(f"{RATING.get(info.quality, '')} {QUALITY_TEXT.get(info.quality, '')}" if info
-                     else "no data")
+        if info:
+            parts.append(f"{RATING.get(info.quality, '')}: {info.text()}"
+                         + (" (10 m available)" if info.fine else ""))
+        else:
+            parts.append("no data")
         packs = self._inventory.installed.get(tile)
         if packs:
             parts.append("✔ installed in " + ", ".join(p.describe() for p in packs))

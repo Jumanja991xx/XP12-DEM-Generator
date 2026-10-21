@@ -20,9 +20,9 @@ from typing import Optional
 from .regions import Tile
 
 # First guesses (seconds) until real durations are known.
-DEFAULT_BUILD = {("improve", "1"): 110, ("improve", "3"): 90,
-                 ("rebuild", "1"): 200, ("rebuild", "3"): 150}
-DEFAULT_DOWNLOAD = 25.0   # one uncached elevation tile
+DEFAULT_BUILD = {("improve", "1"): 110, ("improve", "3"): 90, ("improve", "13"): 240,
+                 ("rebuild", "1"): 200, ("rebuild", "3"): 150, ("rebuild", "13"): 480}
+DEFAULT_DOWNLOAD = 40.0   # one uncached elevation tile (national mosaics take a while)
 CACHED_DOWNLOAD = 0.5     # tile already on disk (3" may still need resampling)
 FINAL_BASE, FINAL_PER_TILE = 4.0, 1.0  # assembling + installing the pack
 HISTORY = 12              # remembered durations per kind of build

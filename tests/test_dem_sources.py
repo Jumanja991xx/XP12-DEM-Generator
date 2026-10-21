@@ -103,9 +103,11 @@ class _Server:
         if url not in self.files:
             return _Resp(404)
         body = self.files[url]
-        if headers and "Range" in headers:
+        if headers and "Range" in headers and self.ranges:
             a, b = headers["Range"].split("=")[1].split("-")
-            return _Resp(206, body[int(a):int(b) + 1])
+            part = body[int(a):int(b) + 1]
+            return _Resp(206, part, {"Content-Length": str(len(part)),
+                                     "Content-Range": f"bytes {a}-{int(a) + len(part) - 1}/{len(body)}"})
         return _Resp(200, body)
 
 
@@ -131,12 +133,12 @@ def test_fabdem_member_read_with_range_requests(tmp_path):
         zf.writestr("N47E019_FABDEM_V1-2.tif", b"x" * 3_000_000)  # must not be downloaded
     url = DS.FABDEM_BASE + DS.fabdem_zip_name(47, 18)
     server = _Server({url: archive.getvalue()})
-    DS.HTTPRangeFile.BLOCK = 64 * 1024
     store = dem.DemStore(tmp_path, session=server)
     path, source = store.ensure_with_source(47, 18, 3)
     assert source == "fabdem" and path.stat().st_size == dem.SIZE_3S
-    fetched = sum(1 for _, rng in server.calls if rng)
-    assert fetched * DS.HTTPRangeFile.BLOCK < 3_000_000  # only the needed part was read
+    fetched = sum(int(rng.split("-")[1]) - int(rng.split("=")[1].split("-")[0]) + 1
+                  for url_, rng in server.calls if rng and url_ == url)
+    assert fetched < 3_000_000  # only the needed part was read
 
 
 def test_fabdem_falls_back_to_sonny_with_warning(tmp_path):
@@ -171,12 +173,22 @@ def test_own_geotiff_wins(tmp_path):
 
 
 def test_legacy_sonny_cache_is_reused(tmp_path):
-    legacy = tmp_path / "1s" / "N47E011.hgt"
+    legacy = tmp_path / "1s" / "N47E011.hgt"  # version 0.1 layout (Sonny only)
     legacy.parent.mkdir(parents=True)
     legacy.write_bytes(b"\0" * dem.SIZE_1S)
     store = dem.DemStore(tmp_path, session=_Server({}))
     path, source = store.ensure_with_source(47, 11, 1)
-    assert source == "sonny" and path == tmp_path / "1s" / "sonny" / "N47E011.hgt"
+    assert source == "sonny" and path == legacy and store.has(47, 11, 1)
+
+
+def test_per_source_cache_of_version_01_is_adopted(tmp_path):
+    old = tmp_path / "1s" / "usgs" / "N39W106.hgt"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"\0" * dem.SIZE_1S)
+    store = dem.DemStore(tmp_path, session=_Server({}))
+    assert store.is_cached(39, -106, 1)
+    path, source = store.ensure_with_source(39, -106, 1)
+    assert source == "usgs" and path == tmp_path / "1s" / "N39W106.hgt" and not old.exists()
 
 
 def test_no_source_raises_with_reasons(tmp_path):

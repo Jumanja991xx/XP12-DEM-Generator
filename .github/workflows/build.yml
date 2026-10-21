@@ -100,6 +100,30 @@ jobs:
           if (Test-Path $manifest) { $diag += Get-Content $manifest }
           $text = (($diag | ForEach-Object { "$_" -replace '%', '%25' -replace "`r", '' }) -join "%0A") -replace "::", ": :"
           if ($ok) { Write-Output "::notice title=USGS smoke test::$text" } else { Write-Output "::error title=USGS smoke test::$text"; exit 1 }
+      - name: Smoke test - improve with 1/3 arc-second (10 m) data
+        timeout-minutes: 25
+        shell: pwsh
+        run: |
+          # re-heights the Colorado pack from the previous step with USGS 3DEP 1/3" data
+          $p = Start-Process -FilePath "dist\XP12DEMGenerator\XP12DEMGenerator.exe" -Wait -PassThru -ArgumentList @(
+            "build", "--method", "improve", "--tiles", "+39-106", "--name", "`"CI Ten`"",
+            "--resolution", "13", "--xplane", "`"$env:XP`"")
+          $dsf = "$env:XP\Custom Scenery\z_dem_ci_ten\Earth nav data\+30-110\+39-106.dsf"
+          $hgt = "$env:XP12DEM_DATA\dem\13s\N39W106.hgt"
+          $ok = ($p.ExitCode -eq 0) -and (Test-Path $dsf) -and (Test-Path $hgt) -and ((Get-Item $hgt).Length -eq 233323202)
+          $diag = @("exit=$($p.ExitCode) dsf=$(Test-Path $dsf) hgt=$(if (Test-Path $hgt) { (Get-Item $hgt).Length })")
+          if (Test-Path "$env:XP12DEM_DATA\logs\cli.log") { $diag += Get-Content "$env:XP12DEM_DATA\logs\cli.log" -Tail 25 }
+          $text = (($diag | ForEach-Object { "$_" -replace '%', '%25' -replace "`r", '' }) -join "%0A") -replace "::", ": :"
+          if ($ok) { Write-Output "::notice title=10 m smoke test::$text" } else { Write-Output "::error title=10 m smoke test::$text"; exit 1 }
+      - name: Elevation sources reachability (informational)
+        continue-on-error: true
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $out = python packaging/ci_probe_sources.py 2>&1
+          $out
+          $text = (($out | ForEach-Object { "$_" -replace '%', '%25' -replace "`r", '' }) -join "%0A") -replace "::", ": :"
+          Write-Output "::notice title=Elevation sources::$text"
       - name: Overpass reachability (informational)
         continue-on-error: true
         timeout-minutes: 5

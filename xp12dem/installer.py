@@ -162,17 +162,19 @@ def _write_manifest(pack_dir: Path, added: list[Tile], region_name: str,
 # Installation
 # ---------------------------------------------------------------------------
 def _credits(dems: set[str]) -> str:
+    """Licence / attribution lines for the elevation sources named in ``dems``."""
+    from .dem import SOURCE_LABELS
+    from .sources import SOURCES
+
+    text = " ".join(dems)
     lines = []
-    if not dems or any("Sonny" in d for d in dems):
+    for key, src in SOURCES.items():
+        label = SOURCE_LABELS.get(key, src.label)
+        if label.split(" (")[0] in text or (key == "local" and "own" in text):
+            lines.append(src.licence)
+    if not dems or (not lines and "Sonny" in text):
         lines.append(ATTRIBUTION)
-    if any("USGS" in d for d in dems):
-        lines.append("Elevation data: U.S. Geological Survey 3D Elevation Program (public domain)")
-    if any("FABDEM" in d for d in dems):
-        lines.append("Elevation data: FABDEM V1-2 (c) University of Bristol, based on Copernicus "
-                     "GLO-30 - non-commercial licence")
-    if any("own" in d for d in dems):
-        lines.append("Elevation data: user supplied files")
-    return "\n".join(lines) + "\n"
+    return "\n".join(dict.fromkeys(lines)) + "\n"
 
 
 def install_pack(staged_pack: Path, target: InstallTarget, name: str,

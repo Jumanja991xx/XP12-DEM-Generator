@@ -42,7 +42,8 @@ def _cli_build(argv: list[str]) -> int:
                         help="improve = LiDAR heights for the terrain you already use (XPME, "
                              "AutoOrtho, Ortho4XP, default scenery); rebuild = new Ortho4XP mesh "
                              "for AutoOrtho")
-    parser.add_argument("--resolution", choices=["1", "3"], default="1")
+    parser.add_argument("--resolution", choices=["1", "13", "3"], default="1",
+                        help="1 = 1\" (30 m), 13 = 1/3\" (10 m where available), 3 = 3\" (90 m)")
     parser.add_argument("--mesh", choices=[m.key for m in MESH_DETAILS], default="high")
     parser.add_argument("--xplane", type=Path, help="X-Plane 12 folder (auto-detected)")
     parser.add_argument("--target", choices=["autoortho", "custom_scenery"], default="autoortho",

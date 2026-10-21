@@ -120,35 +120,50 @@ very visible.
 | Option | Values | Notes |
 |---|---|---|
 | Method | **Improve** · **New mesh** | See above. |
-| DEM resolution | **1″** (≈30 m) · **3″** (≈90 m) | 3″ is resampled from Sonny's 1″ data (3×3 mean). |
+| DEM resolution | **1″** (≈30 m) · **1/3″** (≈10 m) · **3″** (≈90 m) | 1/3″ where 1–10 m data exists, otherwise 1″; 3″ is resampled from 1″ (3×3 mean). |
 | Mesh detail (new mesh only) | **Balanced** · **High** · **Maximum** | Ortho4XP `curvature_tol` 2.0 / 1.2 / 0.8 and `limit_tris` 3 / 4 / 5 M triangles per tile. |
 | Tiles at the same time | Automatic / 1 – 8 | *Automatic* picks the best value from CPU threads and RAM (about 2 GB per tile for *improve*, 3 GB for *new mesh*, 4 GB kept free). |
-| Own Sonny DTM folder | optional | Point it at `.hgt` or `.zip` files you downloaded from sonny.4lima.de (e.g. newer country releases). Missing tiles are downloaded automatically. |
+| Own elevation files | optional | Folder with your own GeoTIFFs (any projection), `.hgt`, Sonny `.zip` or FABDEM files. Used first; missing tiles are downloaded automatically. |
 
 ## Elevation data sources
 
-The app picks the best free source for every 1°×1° tile automatically; the map colours show it
-before you build (hover a tile for details):
+Every 1°×1° tile automatically gets the best free source for its area — no account, no API key.
+Weaker sources only fill gaps (sea, the edge of a survey) and are blended in over ~300 m, so no
+step is visible. The map colours show the result before you build (hover a tile for details,
+*Where does the data come from?* on step 1 shows the overview):
 
-| Colour | Source | Where | Quality |
+| Colour | Source | Where | Finest |
 |---|---|---|---|
-| 🟩 green | **Sonny's LiDAR DTM** (CC BY 4.0) | Germany, Austria, Switzerland, Italy, France, Spain, Benelux, Czechia, Slovakia, Slovenia, Poland, Romania, Denmark, UK, Ireland, … | airborne laser scanning, resampled to 1″ (~30 m) |
-| 🟩 green | **USGS 3DEP 1″** (public domain) | USA incl. Alaska, Hawaii, Puerto Rico | LiDAR / IfSAR based, downloaded per tile from the USGS bucket — no API key |
-| 🟦 teal | **Sonny's DTM — national models** | Norway, Sweden, Finland, Estonia, Latvia, Iceland | official 10–50 m terrain models |
-| 🟨 yellow | **FABDEM V1-2** (University of Bristol, non-commercial licence) | everywhere else (e.g. Hungary, Croatia, Portugal, the Balkans, Asia, …) | Copernicus 30 m with forests and buildings removed — clearly better than SRTM |
+| 🟩 Best | **Sonny's LiDAR DTM** (CC BY 4.0) | most of Europe (Alps, Germany, France, Italy, Spain, UK, Poland, …) | 1″ (30 m) |
+| 🟩 Best | **USGS 3DEP** (public domain) | USA incl. Alaska, Hawaii, Puerto Rico | 1/3″ (10 m) |
+| 🟩 Best | **LINZ LiDAR 1 m** + national 8 m DEM (CC BY 4.0) | New Zealand | 1/3″ |
+| 🟩 Best / 🟦 Good | **NRCan HRDEM LiDAR** + **MRDEM 30 m** (Open Government Licence – Canada) | Canada (LiDAR where surveyed, ~2 million km²) | 1/3″ |
+| 🟦 Good | **Sonny's DTM — national models** | Norway, Sweden, Finland, Baltics, Iceland | 1″ |
+| 🟦 Good | **GSI elevation tiles** 5–10 m | Japan | 1/3″ |
+| 🟦 Good | **ArcticDEM 10 m** (CC BY 4.0) | Greenland, Svalbard and land above ~67° N | 1/3″ |
+| 🟥 Basic | **FABDEM V1-2** (non-commercial licence), **Copernicus GLO-30** as gap filler | everywhere else | 1″ |
 
+* All reading is partial: the national mosaics are Cloud Optimized GeoTIFFs of up to 80 GB, the
+  app downloads only the part and the detail level it needs (a few MB to ~150 MB per tile).
+* ArcticDEM heights refer to the ellipsoid; the app converts them to heights above sea level
+  by calibrating against Copernicus GLO-30 (30–70 m difference in Greenland/Iceland).
 * Sonny's tiles come from the per-tile mirror [mg4gh/hgtdata](https://github.com/mg4gh/hgtdata)
   (Europe 1″ v24).
-* FABDEM is published as 10°×10° zip files. The app reads just the needed tile out of the remote
-  zip (HTTP range requests). If the server does not allow that, the build tells you exactly which
-  zip to download from [data.bris.ac.uk](https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn);
-  put it (or the extracted `.tif`) into the *Own DEM folder* and build again. Until then the tile
-  falls back to Sonny's satellite-based data, with a warning in the log.
-* **Own DEM folder** (step 2, Advanced): any `.hgt`, Sonny `.zip`, FABDEM zip/`.tif` or
-  geographic (lat/lon) GeoTIFF whose file name contains the tile (e.g. `N47E018`, `n48w122`,
-  `N47_00_E018_00`) is used first — handy for national LiDAR data you bought or downloaded.
-* All sources are converted to the same 1″ grid; 3″ is resampled from it. The pack's
-  `xp12dem_pack.json` and `README.txt` record which source each tile used.
+* FABDEM is published as 10°×10° zip files; the app reads just the needed tile out of the remote
+  zip. If the server does not allow that, the log names the zip to download from
+  [data.bris.ac.uk](https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn) into the
+  *Own elevation files* folder; meanwhile Copernicus GLO-30 is used.
+* Australia: FABDEM, with Geoscience Australia's 1″ DEM-H as fallback.
+* **Own elevation files** (step 2, Advanced): any GeoTIFF in any projection (found by its
+  coordinates, not its name), SRTM `.hgt`, Sonny `.zip`, FABDEM zip/`.tif`. These files win over
+  everything else. Free 1–10 m data you can add this way: swissALTI3D (swisstopo), Austria's
+  ALS DTM (data.gv.at), Bavaria's DGM1 (geodaten.bayern.de), South Tyrol's DTM, Australian
+  LiDAR from ELVIS (elevation.fsdf.org.au), Mexico's CEM (INEGI).
+* **Resolution:** 1″ (≈30 m) is the default. 1/3″ (≈10 m) uses the full detail where a 1–10 m
+  source covers the tile (others fall back to 1″) — files are 9× bigger (233 MB per tile) and
+  builds slower. 3″ is resampled from 1″.
+* The pack's `xp12dem_pack.json` and `README.txt` record the sources of every tile and the
+  required attributions.
 * **New mesh mode only:** water, coastline, airport and road geometry from OpenStreetMap via Overpass.
 
 ## Command line
@@ -185,7 +200,9 @@ and smoke-tests the Windows executable with GitHub Actions; tags `v*` publish a 
 xp12dem/
   gui/            PySide6 wizard (map widget, 4 steps)
   regions.py      presets and 1°×1° tile helpers
-  dem.py          Sonny DTM download, validation, 3″ resampling
+  dem.py          per-tile cache, source chain with soft gap filling, 3″ resampling
+  sources.py      elevation sources (Sonny, USGS, LINZ, NRCan, GSI, ArcticDEM, FABDEM, GLO-30, own files)
+  raster.py       partial COG reading over HTTP, reprojection onto the tile grid
   pipeline.py     orchestration: DEM → per-tile worker → pack → install
   eta.py          remaining-time estimate (remembers build times per PC)
   inventory.py    installed packs and downloaded DEM tiles shown on the map

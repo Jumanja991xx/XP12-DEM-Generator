@@ -1,28 +1,29 @@
-"""Download and prepare Sonny's LiDAR DTM tiles.
+"""Elevation data per 1x1 degree tile, from the best free source available.
 
-Sonny publishes his European terrain models as 1x1 degree SRTM ``.hgt`` files
-(CC BY 4.0, https://sonny.4lima.de). The original site serves whole countries
-through Google Drive, which cannot be fetched per tile, so by default we use
-the per-tile mirror of the 1" "Europe" collection at
-https://github.com/mg4gh/hgtdata. Users who already downloaded newer releases
-from Sonny's site can point the app at that folder instead.
+The order of sources per tile comes from ``resources/dem_coverage.json``
+(see :mod:`xp12dem.dem_sources`); the sources themselves live in
+:mod:`xp12dem.sources`. The best source is used where it has data, the next
+ones fill its gaps (sea, survey edges) with a soft blend. The result is
+cached as an SRTM-style ``.hgt`` per tile and resolution, with a small JSON
+file next to it that records which sources were used.
 """
 
 from __future__ import annotations
 
 import io
+import json
 import os
-import shutil
 import threading
-import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import numpy as np
 import requests
 
+from . import raster as R
+from .raster import Cancelled  # noqa: F401  (re-exported)
 from .regions import hgt_name
 
 MIRROR_URL = "https://raw.githubusercontent.com/mg4gh/hgtdata/main/docs/{name}.zip"
@@ -30,35 +31,45 @@ ATTRIBUTION = "Elevation data: Sonny's LiDAR Digital Terrain Models of Europe (h
 
 SIZE_1S = 3601 * 3601 * 2  # 25,934,402 bytes
 SIZE_3S = 1201 * 1201 * 2  # 2,884,802 bytes
+SIZE_13S = 10801 * 10801 * 2
+FEATHER_M = 300.0  # blend width where a weaker source fills gaps of a better one
 
 
 @dataclass(frozen=True)
 class Resolution:
     key: str
     label: str
-    arcsec: int
+    arcsec: float
     description: str
+
+    @property
+    def posts(self) -> int:
+        return int(round(3600 / self.arcsec)) + 1
+
+    @property
+    def folder(self) -> str:
+        return {"1": "1s", "3": "3s", "13": "13s"}[self.key]
 
 
 RESOLUTIONS: tuple[Resolution, ...] = (
     Resolution("1", '1 arc-second (≈ 30 m)', 1,
-               "Sonny's native resolution. Sharp ridges and narrow valleys; "
-               "largest files and longest build time."),
+               "Recommended. Sharp ridges and narrow valleys; the native resolution of "
+               "Sonny's LiDAR DTM and most national models."),
+    Resolution("13", '1/3 arc-second (≈ 10 m)', 1 / 3,
+               "Even finer where 10 m data exists (USA, New Zealand, Canada LiDAR, Japan, "
+               "Arctic, your own files). Other tiles use 1\". Big files, slower builds."),
     Resolution("3", '3 arc-seconds (≈ 90 m)', 3,
                "Resampled from the 1\" data. Smooth, light-weight terrain; "
                "about 3x faster to build."),
 )
 
 
-def resolution(key: str) -> Resolution:
+def resolution(key: Union[str, int, float]) -> Resolution:
+    key = {1: "1", 3: "3"}.get(key, key) if not isinstance(key, str) else key
     for res in RESOLUTIONS:
         if res.key == key:
             return res
     raise KeyError(key)
-
-
-class Cancelled(Exception):
-    pass
 
 
 ProgressFn = Callable[[int, int], None]  # (bytes_done, bytes_total)
@@ -66,9 +77,16 @@ ProgressFn = Callable[[int, int], None]  # (bytes_done, bytes_total)
 
 SOURCE_LABELS = {
     "local": "your own DEM files",
-    "usgs": "USGS 3DEP 1\"",
+    "usgs": "USGS 3DEP",
     "sonny": "Sonny's LiDAR DTM",
     "fabdem": "FABDEM V1-2",
+    "glo30": "Copernicus GLO-30",
+    "linz": "LINZ LiDAR 1 m (New Zealand)",
+    "hrdem": "NRCan HRDEM LiDAR (Canada)",
+    "mrdem": "NRCan MRDEM 30 m (Canada)",
+    "arcticdem": "ArcticDEM 10 m",
+    "gsi": "GSI 5-10 m (Japan)",
+    "ga": "Geoscience Australia 1\" DEM-H",
 }
 
 
@@ -80,262 +98,209 @@ def source_label(source: str, lat: int, lon: int) -> str:
         info = tile_info((lat, lon))
         if info is not None and info.quality == FABDEM:
             return "Sonny's DTM (SRTM/Viewfinder based in this area)"
-    return SOURCE_LABELS[source]
+    return SOURCE_LABELS.get(source, source)
 
 
 class DemStore:
-    """Local cache of DEM tiles, filled from the best available source per tile.
-
-    Order of preference: the user's own files, then the source the coverage
-    map recommends (USGS 3DEP in the USA, Sonny where he has LiDAR or national
-    models, FABDEM elsewhere), then the remaining sources as fallback.
-    """
+    """Cache of merged elevation tiles, filled from the best sources per tile."""
 
     def __init__(self, cache_dir: Path, local_source: Optional[Path] = None,
-                 session: Optional[requests.Session] = None):
+                 session: Optional[requests.Session] = None, log: Callable[[str], None] = lambda t: None):
         self.cache_dir = Path(cache_dir)
         self.local_source = Path(local_source) if local_source else None
         self.session = session or requests.Session()
-        self.session.headers.setdefault("User-Agent", "XP12-DEM-Generator")
+        try:
+            self.session.headers.setdefault("User-Agent", "XP12-DEM-Generator")
+        except AttributeError:
+            pass
         self.warnings: list[str] = []
+        self.log = log
 
     # -- paths -----------------------------------------------------------
-    def path(self, lat: int, lon: int, arcsec: int = 1, source: str = "sonny") -> Path:
-        return self.cache_dir / f"{arcsec}s" / source / f"{hgt_name(lat, lon)}.hgt"
+    def path(self, lat: int, lon: int, res: Union[str, int, float] = "1", source: Optional[str] = None) -> Path:
+        res = resolution(res)
+        if source:  # cache layout of version 0.1 (one folder per source)
+            return self.cache_dir / res.folder / source / f"{hgt_name(lat, lon)}.hgt"
+        return self.cache_dir / res.folder / f"{hgt_name(lat, lon)}.hgt"
 
-    def _legacy_path(self, lat: int, lon: int, arcsec: int) -> Path:
-        # caches written by version 0.1 (Sonny only) had no source folder
-        return self.cache_dir / f"{arcsec}s" / f"{hgt_name(lat, lon)}.hgt"
+    def meta(self, lat: int, lon: int, res: Union[str, int, float] = "1") -> dict:
+        meta_file = self.path(lat, lon, res).with_suffix(".json")
+        try:
+            return json.loads(meta_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
 
-    def has(self, lat: int, lon: int, arcsec: int = 1, source: str = "sonny") -> bool:
-        return (_valid_hgt(self.path(lat, lon, arcsec, source), arcsec)
-                or (source == "sonny" and _valid_hgt(self._legacy_path(lat, lon, arcsec), arcsec)))
-
-    def is_cached(self, lat: int, lon: int, arcsec: int) -> bool:
-        """True if ``ensure`` will not need to download anything."""
-        order = self.candidates(lat, lon)
-        if not order:
+    def has(self, lat: int, lon: int, res: Union[str, int, float] = "1", source: Optional[str] = None) -> bool:
+        res = resolution(res)
+        path = self.path(lat, lon, res.key, source)
+        if not _valid_size(path, res):
             return False
-        source = order[0]  # ensure() only falls back to later sources after a failure
-        return source == "local" or self.has(lat, lon, arcsec, source) or self.has(lat, lon, 1, source)
+        return source is not None or path.with_suffix(".json").is_file()
+
+    def _context(self, progress, cancel):
+        from .sources import Context
+
+        return Context(self.session, self.cache_dir, self.local_source, cancel, progress, self.log)
 
     def candidates(self, lat: int, lon: int) -> list[str]:
-        from .dem_sources import FABDEM, LIDAR, NATIONAL, USGS, find_fabdem_archives, \
-            find_local_files, tile_info
+        """Sources for a tile, best first."""
+        from .dem_sources import tile_info
+        from .sources import SOURCES
 
-        order: list[str] = []
-        if self.local_source and [p for p in find_local_files(self.local_source, lat, lon)
-                                  if "fabdem" not in p.name.lower()]:
-            order.append("local")
         info = tile_info((lat, lon))
-        if info is None:
-            order += ["sonny", "fabdem"]
-        elif info.quality == USGS:
-            order += ["usgs", "fabdem"]
-        elif info.quality in (LIDAR, NATIONAL):
-            order += ["sonny", "fabdem"]
-        else:  # FABDEM is the best free source; Sonny (satellite based) as fallback
-            order += ["fabdem"] + (["sonny"] if info.has_sonny else [])
-        return order
+        chain = list(info.sources) if info else ["sonny", "fabdem", "glo30"]
+        if self.local_source and SOURCES["local"].files_for(self._context(None, None), lat, lon):
+            chain.insert(0, "local")
+        return chain
+
+    def fine_available(self, lat: int, lon: int) -> bool:
+        """Is 1/3" worth it here (a source with <= ~12 m posts)?"""
+        from .dem_sources import tile_info
+        from .sources import SOURCES
+
+        if self.local_source:
+            native = SOURCES["local"].native_m_for(self._context(None, None), lat, lon)
+            if native is not None and native <= 12:
+                return True
+        info = tile_info((lat, lon))
+        return bool(info and info.fine)
+
+    def is_cached(self, lat: int, lon: int, res: Union[str, int, float] = "1") -> bool:
+        """True if ``ensure`` will not need to download anything."""
+        res = resolution(res)
+        if res.key == "13" and not self.fine_available(lat, lon):
+            res = resolution("1")
+        if self.has(lat, lon, res.key) or (res.key == "3" and self.has(lat, lon, "1")):
+            return True
+        return self._legacy(lat, lon) is not None
 
     # -- public API ------------------------------------------------------
-    def ensure(self, lat: int, lon: int, arcsec: int,
+    def ensure(self, lat: int, lon: int, res: Union[str, int, float] = "1",
                progress: Optional[ProgressFn] = None,
                cancel: Optional[threading.Event] = None) -> Path:
         """Return a valid local ``.hgt`` for the tile, downloading if needed."""
-        return self.ensure_with_source(lat, lon, arcsec, progress, cancel)[0]
+        return self.ensure_with_source(lat, lon, res, progress, cancel)[0]
 
-    def ensure_with_source(self, lat: int, lon: int, arcsec: int,
+    def ensure_with_source(self, lat: int, lon: int, res: Union[str, int, float] = "1",
                            progress: Optional[ProgressFn] = None,
                            cancel: Optional[threading.Event] = None) -> tuple[Path, str]:
-        if arcsec not in (1, 3):
-            raise ValueError(f"Unsupported resolution: {arcsec}")
+        """(path, main source key). ``describe`` gives the human readable sources."""
+        res = resolution(res)
+        if res.key == "13" and not self.fine_available(lat, lon):
+            self.warnings.append(f"{hgt_name(lat, lon)}: no 10 m data here - using 1\" "
+                                 "(the best available)")
+            res = resolution("1")
+        if res.key == "3":
+            base, source = self.ensure_with_source(lat, lon, "1", progress, cancel)
+            target = self.path(lat, lon, "3")
+            if not self.has(lat, lon, "3") or self.meta(lat, lon, "3") != self.meta(lat, lon, "1"):
+                downsample_to_3s(base, target)
+                target.with_suffix(".json").write_text(json.dumps(self.meta(lat, lon, "1")), encoding="utf-8")
+            return target, source
+        target = self.path(lat, lon, res.key)
+        if self.has(lat, lon, res.key):
+            return target, self.meta(lat, lon, res.key).get("main", "?")
+        if res.key == "1":
+            adopted = self._adopt_legacy(lat, lon)
+            if adopted:
+                return target, adopted
+        return target, self._build(lat, lon, res, target, progress, cancel)
+
+    def describe(self, lat: int, lon: int, res: Union[str, int, float] = "1") -> str:
+        """Human readable sources of a cached tile, e.g. 'LINZ LiDAR 1 m + FABDEM V1-2 (gaps)'."""
+        res = resolution(res)
+        meta = self.meta(lat, lon, res.key)
+        if not meta and res.key == "13":
+            meta = self.meta(lat, lon, "1")
+        used = meta.get("sources", [])
+        if not used:
+            return source_label(meta.get("main", "sonny"), lat, lon)
+        text = source_label(used[0]["key"], lat, lon)
+        extra = [u for u in used[1:] if u.get("share", 0) >= 0.01]
+        if extra:
+            text += " + " + ", ".join(source_label(u["key"], lat, lon) for u in extra) + " (gaps)"
+        return text
+
+    # -- building --------------------------------------------------------
+    def _build(self, lat: int, lon: int, res: Resolution, target: Path,
+               progress: Optional[ProgressFn], cancel: Optional[threading.Event]) -> str:
+        from .sources import SOURCES, NotAvailable
+
+        ctx = self._context(progress, cancel)
+        n = res.posts
+        name = hgt_name(lat, lon)
+        grid: Optional[np.ndarray] = None
+        used: list[dict] = []
         errors: list[str] = []
-        order = self.candidates(lat, lon)
-        for index, source in enumerate(order):
-            if cancel is not None and cancel.is_set():
-                raise Cancelled()
-            target = self.path(lat, lon, arcsec, source)
-            if _valid_hgt(target, arcsec):
-                return target, source
-            base = self.path(lat, lon, 1, source)
-            legacy = self._legacy_path(lat, lon, 1)
+        feather = max(1, int(round(FEATHER_M / (R.metres_per_degree_lat() / (n - 1)))))
+        chain = self.candidates(lat, lon)
+        for index, key in enumerate(chain):
+            ctx.check()
+            if grid is not None and not np.isnan(grid).any():
+                break
             try:
-                if source == "sonny" and not _valid_hgt(base, 1) and _valid_hgt(legacy, 1):
-                    base.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(legacy, base)
-                if not _valid_hgt(base, 1):
-                    self._fetch(source, lat, lon, base, progress, cancel)
-                if arcsec == 3:
-                    downsample_to_3s(base, target)
-                if index > 0 and errors:
-                    self.warnings.append(f"{hgt_name(lat, lon)}: used {source_label(source, lat, lon)} "
-                                         f"because {'; '.join(errors)}")
-                return target, source
+                part = SOURCES[key].fetch(ctx, lat, lon, n)
             except Cancelled:
                 raise
-            except Exception as exc:
-                errors.append(f"{SOURCE_LABELS[source]}: {exc}")
-        raise RuntimeError(f"No elevation data for {hgt_name(lat, lon)} - " + " | ".join(errors))
-
-    # -- sources ---------------------------------------------------------
-    def _fetch(self, source: str, lat: int, lon: int, dest: Path,
-               progress: Optional[ProgressFn], cancel: Optional[threading.Event]) -> None:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if source == "sonny":
-            self._fetch_sonny(lat, lon, dest, progress, cancel)
-        elif source == "usgs":
-            self._fetch_usgs(lat, lon, dest, progress, cancel)
-        elif source == "fabdem":
-            self._fetch_fabdem(lat, lon, dest, progress, cancel)
-        elif source == "local":
-            self._fetch_local(lat, lon, dest)
-        else:
-            raise ValueError(source)
-
-    def _fetch_sonny(self, lat: int, lon: int, dest: Path,
-                     progress: Optional[ProgressFn], cancel: Optional[threading.Event]) -> None:
-        if self.local_source and self._import_local_sonny(lat, lon, dest):
-            return
-        name = hgt_name(lat, lon)
-        url = MIRROR_URL.format(name=name)
-        payload = self._download_with_retries(url, progress, cancel, "tile outside Sonny's coverage")
-        _extract_hgt(payload, name, dest, arcsec=1)
-
-    def _fetch_usgs(self, lat: int, lon: int, dest: Path,
-                    progress: Optional[ProgressFn], cancel: Optional[threading.Event]) -> None:
-        from .dem_sources import raster_to_grid, read_geotiff, usgs_url, valid_fraction, write_hgt
-
-        payload = self._download_with_retries(usgs_url(lat, lon), progress, cancel,
-                                              "no USGS 3DEP 1\" tile here")
-        grid = raster_to_grid([read_geotiff(io.BytesIO(payload))], lat, lon)
-        if valid_fraction(grid) < 0.2:
-            raise ValueError("USGS tile does not cover this area")
-        write_hgt(grid, dest)
-
-    def _fetch_fabdem(self, lat: int, lon: int, dest: Path,
-                      progress: Optional[ProgressFn], cancel: Optional[threading.Event]) -> None:
-        from .dem_sources import (FABDEM_BASE, HTTPRangeFile, NeedsManualDownload,
-                                  fabdem_manual_message, fabdem_member, fabdem_zip_name,
-                                  find_fabdem_archives, find_local_files, raster_to_grid,
-                                  read_geotiff, read_zip_member_tif, valid_fraction, write_hgt)
-
-        member = fabdem_member(lat, lon)
-        raster = None
-        if self.local_source:  # extracted tile or the 10x10 degree archive
-            for tif in find_local_files(self.local_source, lat, lon):
-                if "fabdem" in tif.name.lower() and tif.suffix.lower() in (".tif", ".tiff"):
-                    raster = read_geotiff(tif)
-                    break
-            if raster is None:
-                for archive in find_fabdem_archives(self.local_source, lat, lon):
-                    raster = read_zip_member_tif(archive, member)
-                    if raster is not None:
-                        break
-        if raster is None:
-            try:
-                remote = HTTPRangeFile(FABDEM_BASE + fabdem_zip_name(lat, lon), self.session,
-                                       progress, cancel)
-                raster = read_zip_member_tif(remote, member)
-            except NeedsManualDownload:
-                raise NeedsManualDownload(fabdem_manual_message(lat, lon))
-            except InterruptedError:
-                raise Cancelled()
-            except (requests.RequestException, OSError, zipfile.BadZipFile) as exc:
-                raise NeedsManualDownload(fabdem_manual_message(lat, lon)) from exc
-            if raster is None:
-                raise FileNotFoundError(f"{member} is not part of FABDEM (sea?)")
-        grid = raster_to_grid([raster], lat, lon)
-        if valid_fraction(grid) < 0.2:
-            raise ValueError("FABDEM tile does not cover this area")
-        write_hgt(grid, dest)
-
-    def _fetch_local(self, lat: int, lon: int, dest: Path) -> None:
-        """Any .hgt/.tif/.zip in the user's folder whose name matches the tile."""
-        from .dem_sources import GeoRaster, find_local_files, raster_to_grid, read_geotiff, \
-            valid_fraction, write_hgt
-
-        assert self.local_source is not None
-        rasters = []
-        for path in find_local_files(self.local_source, lat, lon):
-            suffix = path.suffix.lower()
-            try:
-                if suffix == ".hgt" and path.stat().st_size == SIZE_1S:
-                    shutil.copyfile(path, dest)
-                    return
-                if suffix == ".zip":
-                    if self._import_local_sonny(lat, lon, dest):
-                        return
-                    continue
-                if suffix == ".hgt":
-                    size = int(round((path.stat().st_size / 2) ** 0.5))
-                    data = np.fromfile(path, ">i2").reshape(size, size).astype(np.float32)
-                    data[data <= -32000] = np.nan
-                    step = 1.0 / (size - 1)
-                    rasters.append(GeoRaster(data, lon, lat + 1, step, step))
-                elif suffix in (".tif", ".tiff") and "fabdem" not in path.name.lower():
-                    rasters.append(read_geotiff(path))
-            except Exception:
+            except NotAvailable as exc:
+                if index == 0 and key != "local":
+                    errors.append(f"{source_label(key, lat, lon)}: {exc}")
                 continue
-        if not rasters:
-            raise FileNotFoundError("no readable file for this tile in your DEM folder")
-        grid = raster_to_grid(rasters, lat, lon)
-        if valid_fraction(grid) < 0.2:
-            raise ValueError("your files do not cover this tile")
-        write_hgt(grid, dest)
-
-    # -- helpers ---------------------------------------------------------
-    def _download_with_retries(self, url: str, progress: Optional[ProgressFn],
-                               cancel: Optional[threading.Event], missing_hint: str) -> bytes:
-        last_error: Optional[Exception] = None
-        for attempt in range(4):
-            if cancel is not None and cancel.is_set():
-                raise Cancelled()
-            try:
-                return self._download(url, progress, cancel, missing_hint)
-            except (Cancelled, FileNotFoundError):
-                raise
-            except Exception as exc:  # network hiccup, truncated download...
-                last_error = exc
-                time.sleep(2 ** attempt)
-        raise RuntimeError(f"download failed: {last_error}")
-
-    def _download(self, url: str, progress: Optional[ProgressFn],
-                  cancel: Optional[threading.Event], missing_hint: str = "not found") -> bytes:
-        with self.session.get(url, stream=True, timeout=60) as response:
-            if response.status_code in (403, 404):
-                raise FileNotFoundError(missing_hint)
-            response.raise_for_status()
-            total = int(response.headers.get("Content-Length") or 0)
-            buf = io.BytesIO()
-            for chunk in response.iter_content(chunk_size=1 << 16):
-                if cancel is not None and cancel.is_set():
-                    raise Cancelled()
-                buf.write(chunk)
-                if progress:
-                    progress(buf.tell(), total)
-            return buf.getvalue()
-
-    def _import_local_sonny(self, lat: int, lon: int, dest: Path) -> bool:
-        """Use a 1" .hgt (or .zip containing one) from the user's own folder."""
-        name = hgt_name(lat, lon)
-        if not self.local_source or not self.local_source.is_dir():
-            return False
-        candidates = [p for p in self.local_source.rglob("*")
-                      if p.is_file() and p.stem.upper() == name and p.suffix.lower() in (".hgt", ".zip")]
-        for candidate in sorted(candidates, key=lambda p: p.suffix.lower() != ".hgt"):
-            try:
-                if candidate.suffix.lower() == ".hgt":
-                    if candidate.stat().st_size != SIZE_1S:
-                        continue
-                    tmp = dest.with_suffix(".part")
-                    tmp.write_bytes(candidate.read_bytes())
-                    os.replace(tmp, dest)
-                else:
-                    _extract_hgt(candidate.read_bytes(), name, dest, arcsec=1)
-                return True
-            except Exception:
+            except Exception as exc:  # network trouble, server changes...
+                errors.append(f"{source_label(key, lat, lon)}: {exc}")
                 continue
+            before = 0 if grid is None else int(np.count_nonzero(~np.isnan(grid)))
+            if grid is None:
+                grid = part.astype(np.float32, copy=True)
+            else:
+                R.feather_fill(grid, part, feather)
+            added = int(np.count_nonzero(~np.isnan(grid))) - before
+            if added > 0:
+                used.append({"key": key, "share": round(added / grid.size, 4)})
+                if errors and len(used) == 1:
+                    self.warnings.append(f"{name}: used {source_label(key, lat, lon)} because "
+                                         + "; ".join(errors))
+        if grid is None or not used:
+            raise RuntimeError(f"No elevation data for {name} - " + (" | ".join(errors) or "no source"))
+        missing = np.isnan(grid)
+        if missing.any():  # only open sea is left: sea level
+            grid[missing] = 0.0
+        R.write_hgt(grid, target)
+        main = used[0]["key"]
+        target.with_suffix(".json").write_text(
+            json.dumps({"main": main, "sources": used, "posts": n}), encoding="utf-8")
+        return main
+
+    # -- caches of version 0.1 --------------------------------------------
+    def _legacy(self, lat: int, lon: int) -> Optional[tuple[Path, str]]:
+        res = resolution("1")
+        plain = self.path(lat, lon, "1")
+        if _valid_size(plain, res) and not plain.with_suffix(".json").is_file():
+            return plain, "sonny"  # version 0.1: Sonny tiles directly in 1s/
+        for key in self.candidates(lat, lon):
+            old = self.path(lat, lon, "1", key)
+            if _valid_size(old, res):
+                return old, key
+        return None
+
+    def _adopt_legacy(self, lat: int, lon: int) -> Optional[str]:
+        found = self._legacy(lat, lon)
+        if found is None:
+            return None
+        old, key = found
+        target = self.path(lat, lon, "1")
+        if old != target:
+            os.replace(old, target)
+        target.with_suffix(".json").write_text(
+            json.dumps({"main": key, "sources": [{"key": key, "share": 1.0}], "posts": 3601}),
+            encoding="utf-8")
+        return key
+
+
+def _valid_size(path: Path, res: "Resolution") -> bool:
+    try:
+        return path.stat().st_size == res.posts * res.posts * 2
+    except OSError:
         return False
 
 

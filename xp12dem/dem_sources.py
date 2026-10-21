@@ -31,16 +31,20 @@ from .paths import resources_dir
 from .regions import Tile, hgt_name
 
 # ---------------------------------------------------------------------------
-# Quality classes (from resources/dem_coverage.json)
+# Quality classes and per-tile source order (resources/dem_coverage.json)
 # ---------------------------------------------------------------------------
 LIDAR, NATIONAL, USGS, FABDEM = "L", "N", "U", "F"
 
 QUALITY_TEXT = {
-    LIDAR: "LiDAR (Sonny's DTM)",
-    NATIONAL: "National 10-50 m terrain model (Sonny's DTM)",
+    LIDAR: "LiDAR",
+    NATIONAL: "National 5-50 m terrain model",
     USGS: "USGS 3DEP (LiDAR / IfSAR based)",
     FABDEM: "FABDEM (satellite, forests and buildings removed)",
 }
+RATING = {LIDAR: "best", USGS: "best", NATIONAL: "good", FABDEM: "basic"}
+
+# Default order when a tile has no explicit list.
+DEFAULT_CHAIN = ("fabdem", "glo30")
 
 
 @dataclass(frozen=True)
@@ -48,14 +52,41 @@ class TileInfo:
     quality: str  # one of L, N, U, F
     has_sonny: bool
     country: str
+    sources: tuple = DEFAULT_CHAIN  # best first; later ones fill gaps
+    fine: bool = False  # a source with <= 10 m posts covers this tile (1/3" worth it)
+
+    @property
+    def primary(self) -> str:
+        return self.sources[0] if self.sources else "fabdem"
+
+    def text(self) -> str:
+        from .sources import SOURCES
+
+        src = SOURCES.get(self.primary)
+        name = src.label if src else self.primary
+        if self.primary == "sonny" and self.quality == FABDEM:
+            name = "Sonny's DTM (satellite based here)"
+        return name
 
 
 @lru_cache(maxsize=1)
 def coverage() -> dict[Tile, TileInfo]:
     data = json.loads((resources_dir() / "dem_coverage.json").read_text(encoding="utf-8"))
     out = {}
-    for lat, lon, code, country in data["tiles"]:
-        out[(int(lat), int(lon))] = TileInfo(code[0], code.endswith("s"), country)
+    for row in data["tiles"]:
+        lat, lon, code, country = row[:4]
+        sources = tuple(row[4].split(",")) if len(row) > 4 and row[4] else None
+        fine = bool(row[5]) if len(row) > 5 else False
+        if sources is None:  # version 1 file
+            if code[0] == USGS:
+                sources = ("usgs", "fabdem", "glo30")
+            elif code[0] in (LIDAR, NATIONAL):
+                sources = ("sonny", "fabdem", "glo30")
+            elif code.endswith("s"):
+                sources = ("fabdem", "sonny", "glo30")
+            else:
+                sources = DEFAULT_CHAIN
+        out[(int(lat), int(lon))] = TileInfo(code[0], code.endswith("s"), country, sources, fine)
     return out
 
 
@@ -113,25 +144,51 @@ class NeedsManualDownload(RuntimeError):
 class HTTPRangeFile(io.RawIOBase):
     """Read-only, seekable view of a remote file using HTTP range requests.
 
-    Lets :class:`zipfile.ZipFile` read the central directory and a single
-    member of a multi-gigabyte archive without downloading all of it.
+    Lets :class:`zipfile.ZipFile` and ``tifffile`` read the directory and a few
+    parts of a multi-gigabyte file without downloading all of it. Requests
+    start small (64 KB, enough for most headers) and double in size while a
+    reader keeps going sequentially, up to 8 MB.
     """
 
-    BLOCK = 1 << 20
+    BLOCK = 64 * 1024  # first request size
+    MAX_BLOCK = 8 << 20
 
     def __init__(self, url: str, session, progress: Optional[Callable[[int, int], None]] = None,
                  cancel=None):
         super().__init__()
         self.url, self.session, self.progress, self.cancel = url, session, progress, cancel
-        head = session.head(url, timeout=30, allow_redirects=True)
-        if head.status_code != 200:
-            raise NeedsManualDownload(f"HTTP {head.status_code}")
-        self.size = int(head.headers.get("Content-Length") or 0)
-        if not self.size or head.headers.get("Accept-Ranges", "").lower() != "bytes":
-            raise NeedsManualDownload("server does not support partial downloads")
         self.pos = 0
-        self._blocks: dict[int, bytes] = {}
         self.fetched = 0
+        self._chunks: list[tuple[int, bytes]] = []
+        self._next = self.BLOCK
+        response = self._get(0, self.BLOCK - 1)
+        if response.status_code == 206:
+            match = re.search(r"/(\d+)", response.headers.get("Content-Range", ""))
+            if not match:
+                raise NeedsManualDownload("server did not report the file size")
+            self.size = int(match.group(1))
+            self._store(0, response.content)
+        elif response.status_code == 200:  # no range support: fine for small files only
+            body = response.content
+            if len(body) > 64 << 20:
+                raise NeedsManualDownload("server does not support partial downloads")
+            self.size = len(body)
+            self._store(0, body)
+        else:
+            raise NeedsManualDownload(f"HTTP {response.status_code}")
+
+    def _get(self, start: int, end: int):
+        if self.cancel is not None and self.cancel.is_set():
+            raise InterruptedError("cancelled")
+        return self.session.get(self.url, headers={"Range": f"bytes={start}-{end}"}, timeout=60)
+
+    def _store(self, start: int, body: bytes) -> None:
+        self.fetched += len(body)
+        if self.progress:
+            self.progress(self.fetched, 0)
+        self._chunks.append((start, body))
+        if len(self._chunks) > 48:  # keep memory bounded
+            self._chunks.pop(0)
 
     def seekable(self) -> bool:
         return True
@@ -151,34 +208,39 @@ class HTTPRangeFile(io.RawIOBase):
             self.pos = self.size + offset
         return self.pos
 
-    def _block(self, index: int) -> bytes:
-        if index not in self._blocks:
-            if self.cancel is not None and self.cancel.is_set():
-                raise InterruptedError("cancelled")
-            start = index * self.BLOCK
-            end = min(self.size, start + self.BLOCK) - 1
-            response = self.session.get(self.url, headers={"Range": f"bytes={start}-{end}"}, timeout=60)
-            if response.status_code != 206:
-                raise NeedsManualDownload(f"range request answered HTTP {response.status_code}")
-            if len(self._blocks) > 64:  # keep memory bounded (sequential member reads)
-                self._blocks.pop(next(iter(self._blocks)))
-            self._blocks[index] = response.content
-            self.fetched += len(response.content)
-            if self.progress:
-                self.progress(self.fetched, 0)
-        return self._blocks[index]
+    def _chunk_at(self, pos: int, want: int) -> tuple[int, bytes]:
+        for start, body in reversed(self._chunks):
+            if start <= pos < start + len(body):
+                return start, body
+        size = max(want, self._next)
+        self._next = min(self.MAX_BLOCK, self._next * 2)
+        end = min(self.size, pos + size) - 1
+        response = self._get(pos, end)
+        if response.status_code == 206:
+            body = response.content
+        elif response.status_code == 200:
+            body = response.content[pos:end + 1]
+        else:
+            raise NeedsManualDownload(f"range request answered HTTP {response.status_code}")
+        if not body:
+            raise OSError("empty response")
+        self._store(pos, body)
+        return pos, body
 
     def readinto(self, buffer) -> int:
+        buffer = memoryview(buffer).cast("B")  # numpy arrays report items, not bytes
         if self.pos >= self.size:
             return 0
         want = min(len(buffer), self.size - self.pos)
-        out = bytearray()
-        while len(out) < want:
-            index, offset = divmod(self.pos + len(out), self.BLOCK)
-            out += self._block(index)[offset: offset + want - len(out)]
-        buffer[: len(out)] = out
-        self.pos += len(out)
-        return len(out)
+        done = 0
+        while done < want:
+            start, body = self._chunk_at(self.pos + done, want - done)
+            offset = self.pos + done - start
+            piece = body[offset: offset + want - done]
+            buffer[done: done + len(piece)] = piece
+            done += len(piece)
+        self.pos += done
+        return done
 
 
 def fabdem_manual_message(lat: int, lon: int, folder_hint: str = "") -> str:
@@ -190,92 +252,27 @@ def fabdem_manual_message(lat: int, lon: int, folder_hint: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# GeoTIFF -> 1" grid
+# GeoTIFF -> tile grid (thin wrappers around xp12dem.raster)
 # ---------------------------------------------------------------------------
-@dataclass
-class GeoRaster:
-    data: np.ndarray  # float32, NaN = nodata
-    x0: float  # longitude of the CENTRE of pixel column 0
-    y0: float  # latitude of the CENTRE of pixel row 0
-    dx: float
-    dy: float  # positive; rows go southwards
+from .raster import Raster as GeoRaster, valid_fraction, write_hgt  # noqa: E402,F401
 
 
 def read_geotiff(source) -> GeoRaster:
-    """Read a geographic (EPSG:4326/4269) single-band GeoTIFF."""
-    import tifffile
+    """Read a whole single-band GeoTIFF (any EPSG projection)."""
+    from .raster import TiffSource
 
-    with tifffile.TiffFile(source) as tif:
-        page = tif.pages[0]
-        tags = {tag.name: tag.value for tag in page.tags.values()}
-        scale = tags.get("ModelPixelScaleTag")
-        tie = tags.get("ModelTiepointTag")
-        if not scale or not tie:
-            raise ValueError("GeoTIFF has no georeference")
-        geo = tif.geotiff_metadata or {}
-        model = geo.get("GTModelTypeGeoKey")
-        if model is not None and int(model) != 2:  # 2 = geographic lat/lon
-            raise ValueError("only geographic (lat/lon) GeoTIFFs are supported")
-        pixel_is_point = int(geo.get("GTRasterTypeGeoKey", 1)) == 2
-        data = page.asarray().astype(np.float32)
-        if data.ndim == 3:
-            data = data[..., 0]
-        nodata = tags.get("GDAL_NODATA")
-        if nodata not in (None, ""):
-            try:
-                data[data == float(str(nodata).strip("\x00 "))] = np.nan
-            except ValueError:
-                pass
-        data[(data < -1000) | (data > 9000)] = np.nan
-    dx, dy = float(scale[0]), float(scale[1])
-    i, j, _, x, y, _ = (float(v) for v in tie[:6])
-    x0 = x - i * dx
-    y0 = y + j * dy
-    if not pixel_is_point:  # tie point is the corner of the pixel
-        x0 += dx / 2
-        y0 -= dy / 2
-    return GeoRaster(data, x0, y0, dx, dy)
+    with TiffSource(source) as src:
+        epsg, west, north, width, height, w, h = src.georef()
+        raster = src.read_window((west, north - height, west + width, north), 0.0)
+    if raster is None:
+        raise ValueError("empty GeoTIFF")
+    return raster
 
 
 def raster_to_grid(rasters: Iterable[GeoRaster], lat: int, lon: int, n: int = 3601) -> np.ndarray:
-    """Bilinear resampling onto the n x n posts of a tile (north row first)."""
-    grid = np.full((n, n), np.nan, dtype=np.float32)
-    lons = lon + np.arange(n) / (n - 1)
-    lats = lat + 1 - np.arange(n) / (n - 1)
-    for r in rasters:
-        h, w = r.data.shape
-        col = (lons - r.x0) / r.dx
-        row = (r.y0 - lats) / r.dy
-        eps = 1e-6  # tile edges sit exactly half a pixel outside the outer pixel centres
-        inside_c = (col >= -0.5 - eps) & (col <= w - 0.5 + eps)
-        inside_r = (row >= -0.5 - eps) & (row <= h - 0.5 + eps)
-        if not inside_c.any() or not inside_r.any():
-            continue
-        c = np.clip(col, 0, w - 1)
-        rr = np.clip(row, 0, h - 1)
-        c0 = np.minimum(np.floor(c).astype(np.int64), max(w - 2, 0))
-        r0 = np.minimum(np.floor(rr).astype(np.int64), max(h - 2, 0))
-        fc = (c - c0)[None, :]
-        fr = (rr - r0)[:, None]
-        d = r.data
-        top = d[np.ix_(r0, c0)] * (1 - fc) + d[np.ix_(r0, c0 + 1)] * fc
-        bottom = d[np.ix_(r0 + 1, c0)] * (1 - fc) + d[np.ix_(r0 + 1, c0 + 1)] * fc
-        values = top * (1 - fr) + bottom * fr
-        mask = inside_r[:, None] & inside_c[None, :] & np.isnan(grid)
-        grid[mask] = values[mask]
-    return grid
+    from .raster import resample_to_tile
 
-
-def write_hgt(grid: np.ndarray, dest: Path) -> None:
-    out = np.where(np.isnan(grid), -32768, np.round(grid)).astype(">i2")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(".part")
-    out.tofile(tmp)
-    tmp.replace(dest)
-
-
-def valid_fraction(grid: np.ndarray) -> float:
-    return float(np.count_nonzero(~np.isnan(grid))) / grid.size
+    return resample_to_tile(list(rasters), lat, lon, n)
 
 
 # ---------------------------------------------------------------------------

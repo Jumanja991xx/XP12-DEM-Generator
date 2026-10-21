@@ -129,11 +129,12 @@ def installed_packs(xplane: Optional[Path], extra_roots: Iterable[Path] = ()) ->
 def cached_dems(cache_dir: Path) -> dict[Tile, list[str]]:
     """Elevation tiles already downloaded, with resolution and source."""
     result: dict[Tile, list[str]] = {}
-    for res_dir in ("1s", "3s"):
+    res_names = {"13s": '1/3"', "1s": '1"', "3s": '3"'}
+    for res_dir, res_name in res_names.items():
         base = Path(cache_dir) / res_dir
         if not base.is_dir():
             continue
-        folders = [(p, p.name) for p in base.iterdir() if p.is_dir()] + [(base, "sonny")]
+        folders = [(p, p.name) for p in base.iterdir() if p.is_dir()] + [(base, None)]
         for folder, source in folders:
             for hgt in folder.glob("*.hgt"):
                 match = _HGT.match(hgt.name)
@@ -141,7 +142,13 @@ def cached_dems(cache_dir: Path) -> dict[Tile, list[str]]:
                     continue
                 lat = int(match.group(2)) * (1 if match.group(1).upper() == "N" else -1)
                 lon = int(match.group(4)) * (1 if match.group(3).upper() == "E" else -1)
-                label = f"{res_dir[0]}\" {SOURCE_LABELS.get(source, source)}"
+                key = source
+                if key is None:  # current layout: sources recorded next to the tile
+                    try:
+                        key = json.loads(hgt.with_suffix(".json").read_text("utf-8")).get("main", "sonny")
+                    except (OSError, ValueError):
+                        key = "sonny"  # version 0.1 cache
+                label = f"{res_name} {SOURCE_LABELS.get(key, key)}"
                 entries = result.setdefault((lat, lon), [])
                 if label not in entries:
                     entries.append(label)

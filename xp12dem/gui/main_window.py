@@ -40,12 +40,52 @@ CUSTOM_KEY = "__custom__"
 
 # Rough per-tile build time in minutes on a mid-range CPU, used for estimates.
 _MINUTES = {("1", "balanced"): 3, ("1", "high"): 4, ("1", "maximum"): 6,
-            ("3", "balanced"): 2, ("3", "high"): 3, ("3", "maximum"): 3}
+            ("3", "balanced"): 2, ("3", "high"): 3, ("3", "maximum"): 3,
+            ("13", "balanced"): 7, ("13", "high"): 9, ("13", "maximum"): 12}
 # "improve" mode: copy of the existing mesh, time dominated by DSF conversion.
-_IMPROVE_MINUTES = {"1": 2, "3": 2}
+_IMPROVE_MINUTES = {"1": 2, "3": 2, "13": 4}
 _IMPROVE_MB = 35
 _PACK_MB = {("1", "balanced"): 35, ("1", "high"): 45, ("1", "maximum"): 60,
-            ("3", "balanced"): 30, ("3", "high"): 35, ("3", "maximum"): 40}
+            ("3", "balanced"): 30, ("3", "high"): 35, ("3", "maximum"): 40,
+            ("13", "balanced"): 60, ("13", "high"): 80, ("13", "maximum"): 110}
+# Typical download per tile (MB) - national LiDAR mosaics are read partially.
+_DOWNLOAD_MB = {"1": 25, "3": 25, "13": 150}
+
+DATA_OVERVIEW = """
+<h3>Where the elevation data comes from</h3>
+<p>Every 1°×1° tile automatically gets the best free data for its area. Weaker sources only
+fill gaps (sea, edges of a survey) and are blended in softly. Nothing needs an account or key.</p>
+<table cellspacing="0" cellpadding="5" border="1" style="border-collapse:collapse; border-color:#34465a">
+<tr style="background:#24303d"><th>Area</th><th>Source</th><th>Quality</th><th>Finest</th></tr>
+<tr><td>Europe</td><td>Sonny's LiDAR DTM (CC BY 4.0)</td><td><span style="color:#3ad070">Best</span> /
+<span style="color:#5a9bff">Good</span></td><td>1″ (30 m)</td></tr>
+<tr><td>USA incl. Alaska &amp; Hawaii</td><td>USGS 3DEP (public domain)</td>
+<td><span style="color:#3ad070">Best</span></td><td>1/3″ (10 m)</td></tr>
+<tr><td>New Zealand</td><td>LINZ LiDAR 1 m + national 8 m DEM (CC BY 4.0)</td>
+<td><span style="color:#3ad070">Best</span></td><td>1/3″ (10 m)</td></tr>
+<tr><td>Canada</td><td>NRCan HRDEM LiDAR (surveyed areas) + MRDEM 30 m (OGL Canada)</td>
+<td><span style="color:#3ad070">Best</span> / <span style="color:#5a9bff">Good</span></td><td>1/3″ (10 m)</td></tr>
+<tr><td>Japan</td><td>GSI elevation tiles 5–10 m</td><td><span style="color:#5a9bff">Good</span></td>
+<td>1/3″ (10 m)</td></tr>
+<tr><td>Greenland, high Arctic</td><td>ArcticDEM 10 m (CC BY 4.0), converted to heights above sea level</td>
+<td><span style="color:#5a9bff">Good</span></td><td>1/3″ (10 m)</td></tr>
+<tr><td>Everywhere else</td><td>FABDEM 30 m (forests and buildings removed; non-commercial licence),
+Copernicus GLO-30 fills gaps</td><td><span style="color:#ff6b6b">Basic</span></td><td>1″ (30 m)</td></tr>
+</table>
+<h3>Even better data you can add yourself</h3>
+<p>Download the files and put them into the <b>Own elevation files</b> folder (step 2, Advanced).
+Any GeoTIFF in any projection works - the app finds the tiles by their coordinates and prefers
+them over everything else.</p>
+<ul>
+<li><b>Switzerland</b> - swissALTI3D 0.5 / 2 m: swisstopo.admin.ch (Height model swissALTI3D)</li>
+<li><b>Austria</b> - ALS DTM 1 m / 10 m: data.gv.at (Digitales Geländemodell Österreich)</li>
+<li><b>Bavaria</b> - DGM1: geodaten.bayern.de (OpenData, Digitales Geländemodell 1 m)</li>
+<li><b>South Tyrol</b> - DTM 0.5 / 2.5 m: geokatalog.buergernetz.bz.it</li>
+<li><b>Australia</b> - LiDAR 1–5 m: elevation.fsdf.org.au (ELVIS)</li>
+<li><b>Mexico</b> - CEM 15 m: inegi.org.mx (Continuo de Elevaciones Mexicano)</li>
+</ul>
+<p>Choose <b>1/3″ (≈ 10 m)</b> in step 2 to use the full detail of 1–10 m files.</p>
+"""
 
 
 def _duration(seconds: float) -> str:
@@ -289,11 +329,18 @@ class MainWindow(QMainWindow):
         clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(lambda: self.map.set_selected([], focus=False))
         buttons.addWidget(clear_btn)
-        for view in ("Europe", "USA", "World"):
-            btn = QPushButton(view)
-            btn.clicked.connect(lambda _=False, v=view: self.map.show_view(v))
-            buttons.addWidget(btn)
+        self.view_combo = QComboBox()
+        self.view_combo.addItem("Go to…")
+        from .map_widget import VIEWS
+
+        for view in VIEWS:
+            self.view_combo.addItem(view)
+        self.view_combo.activated.connect(self._go_to_view)
+        buttons.addWidget(self.view_combo, 1)
         left_layout.addLayout(buttons)
+        about_data = QPushButton("Where does the data come from?")
+        about_data.clicked.connect(self._show_data_overview)
+        left_layout.addWidget(about_data)
         self.quality_btn = QPushButton("Highlight data quality")
         self.quality_btn.setCheckable(True)
         self.quality_btn.setToolTip("Strong colours: green = LiDAR, blue = national model, "
@@ -349,6 +396,27 @@ class MainWindow(QMainWindow):
         self.map.set_selected(region.tiles())
         self._suppress_custom = False
         self.name_edit.setText(region.name)
+
+    def _go_to_view(self, index: int) -> None:
+        if index > 0:
+            self.map.show_view(self.view_combo.itemText(index))
+        self.view_combo.setCurrentIndex(0)
+
+    def _show_data_overview(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Elevation data")
+        dialog.resize(760, 640)
+        layout = QVBoxLayout(dialog)
+        text = QLabel(DATA_OVERVIEW)
+        text.setTextFormat(Qt.RichText)
+        text.setWordWrap(True)
+        text.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        layout.addWidget(text)
+        layout.addStretch(1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     # -- what is already installed / downloaded ---------------------------
     def _refresh_inventory(self) -> None:
@@ -510,9 +578,9 @@ class MainWindow(QMainWindow):
 
         layout.addSpacing(6)
         layout.addWidget(QLabel("DEM resolution"))
-        layout.addWidget(_hint("Sonny's models are LiDAR based and far more accurate than the "
-                               "SRTM/Viewfinder data used by X-Plane's default mesh, XPME and the "
-                               "stock AutoOrtho packs."))
+        layout.addWidget(_hint("Every tile uses the best free data for its area (LiDAR or national "
+                               "models where available) - far more accurate than the SRTM data in "
+                               "X-Plane's default mesh, XPME and the stock AutoOrtho packs."))
         self.res_group = QButtonGroup(self)
         self.res_cards: list[OptionCard] = []
         row = QHBoxLayout()
@@ -521,6 +589,8 @@ class MainWindow(QMainWindow):
             self.res_cards.append(card)
             row.addWidget(card)
         layout.addLayout(row)
+        self.fine_label = _hint("")
+        layout.addWidget(self.fine_label)
 
         layout.addSpacing(6)
         self.mesh_label = QLabel("Mesh detail (new mesh only)")
@@ -547,7 +617,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.parallel_combo, 0, 1)
         self.parallel_hint = _hint("")
         grid.addWidget(self.parallel_hint, 0, 2)
-        grid.addWidget(QLabel("Own Sonny DTM folder"), 1, 0)
+        grid.addWidget(QLabel("Own elevation files"), 1, 0)
         folder_row = QHBoxLayout()
         self.dem_folder_edit = QLineEdit()
         self.dem_folder_edit.setPlaceholderText("empty = download automatically")
@@ -556,17 +626,18 @@ class MainWindow(QMainWindow):
         browse.clicked.connect(self._choose_dem_folder)
         folder_row.addWidget(browse)
         grid.addLayout(folder_row, 1, 1, 1, 2)
-        grid.addWidget(_hint("Optional folder with your own elevation files: Sonny .hgt/.zip, FABDEM "
-                             "zips or .tif tiles, or any lat/lon GeoTIFF whose name contains the tile "
-                             "(e.g. N47E018). Files found here are preferred; everything else is "
-                             "downloaded automatically."), 2, 0, 1, 3)
+        grid.addWidget(_hint("Optional folder with your own elevation files: any GeoTIFF in any "
+                             "projection (e.g. swissALTI3D, Austrian / Bavarian 1 m models, Australian "
+                             "LiDAR), SRTM .hgt, Sonny .zip, FABDEM zips. Files here are used first; "
+                             "everything else is downloaded automatically. See \"Where does the data "
+                             "come from?\" on step 1 for download links."), 2, 0, 1, 3)
         grid.setColumnStretch(2, 1)
         layout.addWidget(advanced)
         layout.addStretch(1)
         return page
 
     def _choose_dem_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Folder with Sonny .hgt / .zip files")
+        folder = QFileDialog.getExistingDirectory(self, "Folder with your own elevation files")
         if folder:
             self.dem_folder_edit.setText(folder)
 
@@ -722,7 +793,7 @@ class MainWindow(QMainWindow):
         slug = regions.slugify(name)
         method = self._method_key()
         minutes = self._minutes(len(tiles))
-        download_mb = 14 * len(tiles)
+        download_mb = _DOWNLOAD_MB.get(res.key, 25) * len(tiles)
         per_tile = _IMPROVE_MB if method == "improve" else _PACK_MB[(res.key, detail.key)]
         disk_mb = per_tile * len(tiles)
         mesh_text = ("Mesh: your current terrain, LiDAR heights" if method == "improve"
@@ -770,20 +841,24 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _quality_summary(tiles) -> str:
-        from ..dem_sources import FABDEM, LIDAR, NATIONAL, USGS, coverage
+        from ..dem_sources import FABDEM, RATING, coverage
 
-        names = {LIDAR: "LiDAR (Sonny)", USGS: "LiDAR (USGS 3DEP)", NATIONAL: "national 10-50 m",
-                 FABDEM: "FABDEM"}
-        counts: dict[str, int] = {}
+        colours = {"best": "#3ad070", "good": "#5a9bff", "basic": "#ff6b6b"}
+        counts: dict[tuple[str, str], int] = {}
+        fabdem = False
         for tile in tiles:
             info = coverage().get(tile)
             if info:
-                counts[info.quality] = counts.get(info.quality, 0) + 1
+                key = (RATING.get(info.quality, "basic"), info.text())
+                counts[key] = counts.get(key, 0) + 1
+                fabdem |= info.primary == "fabdem" or info.quality == FABDEM
+        order = {"best": 0, "good": 1, "basic": 2}
         text = "Elevation data: " + ", ".join(
-            f"{counts[q]} × {names[q]}" for q in (LIDAR, USGS, NATIONAL, FABDEM) if q in counts)
-        if FABDEM in counts:
-            text += (" &nbsp;<span style='color:#f0c040'>FABDEM: satellite based (30 m), "
-                     "non-commercial licence - fine for private use</span>")
+            f"<span style='color:{colours[r]}'>{n} × {name}</span>"
+            for (r, name), n in sorted(counts.items(), key=lambda kv: (order[kv[0][0]], -kv[1])))
+        if fabdem:
+            text += (" &nbsp;<span style='color:#9fb0c0'>(FABDEM: non-commercial licence - "
+                     "fine for private use)</span>")
         return text
 
     def _parallel(self) -> int:
@@ -1129,6 +1204,15 @@ class MainWindow(QMainWindow):
 
     def _update_status(self, *_args) -> None:
         tiles = self.map.selected() if hasattr(self, "map") else []
+        if hasattr(self, "fine_label"):
+            from ..dem_sources import coverage
+
+            fine = sum(1 for t in tiles if (coverage().get(t) and coverage()[t].fine))
+            own = (" (plus tiles covered by your own 1-10 m files)"
+                   if hasattr(self, "dem_folder_edit") and self.dem_folder_edit.text().strip() else "")
+            self.fine_label.setText(
+                f"10 m data available for <b>{fine} of {len(tiles)}</b> selected tile(s){own}."
+                if tiles else "")
         if not hasattr(self, "mesh_cards") or not hasattr(self, "parallel_combo"):
             return
         minutes = self._minutes(len(tiles))

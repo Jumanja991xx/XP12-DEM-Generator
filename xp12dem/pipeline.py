@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import paths
-from .dem import Cancelled, DemStore, resolution, source_label
+from .dem import Cancelled, DemStore, resolution
 from .eta import DEFAULT_BUILD, Estimator, TimingHistory, build_key
 from .installer import IMPROVE_PREFIX, InstallTarget, assemble_pack, install_pack, pack_name
 from .o4x_worker import PROGRESS_PREFIX
@@ -170,8 +170,8 @@ class Pipeline:
         res = resolution(req.resolution_key)
         detail = mesh_detail(req.mesh_key)
         tiles = list(req.tiles)
-        store = DemStore(paths.dem_cache_dir(), req.local_dem_source)
-        cached = {t for t in tiles if store.is_cached(t[0], t[1], res.arcsec)}
+        store = DemStore(paths.dem_cache_dir(), req.local_dem_source, log=self.events.log)
+        cached = {t for t in tiles if store.is_cached(t[0], t[1], res.key)}
         expected = (self._history.typical(self._build_key)
                     or float(DEFAULT_BUILD.get((req.method, req.resolution_key), 120)))
         eta = self.eta = Estimator(tiles, cached, req.parallel, expected)
@@ -200,9 +200,9 @@ class Pipeline:
                 pass  # the ticker reports time based progress
 
             try:
-                dem_files[tile], source = store.ensure_with_source(tile[0], tile[1], res.arcsec,
+                dem_files[tile], source = store.ensure_with_source(tile[0], tile[1], res.key,
                                                                    on_bytes, self.cancel_event)
-                self.dem_sources[tile] = source_label(source, *tile)
+                self.dem_sources[tile] = store.describe(tile[0], tile[1], res.key)
                 self.events.log(f"DEM {tile_name(*tile)} ready: {self.dem_sources[tile]}")
                 while store.warnings:
                     self.events.log(f"warning - {store.warnings.pop(0)}")

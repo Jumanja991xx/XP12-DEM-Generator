@@ -25,8 +25,8 @@ are covered by the GNU GPL v3**. The corresponding source is this repository.
 
 ## USGS 3D Elevation Program (3DEP) — public domain
 
-1 arc-second elevation tiles for the USA, downloaded at run time from
-https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1/TIFF/ .
+1 and 1/3 arc-second elevation tiles for the USA, downloaded at run time from
+https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/ .
 
 ## FABDEM V1-2 — University of Bristol, non-commercial licence
 
@@ -36,6 +36,41 @@ https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn — based on
 Copernicus GLO-30 (© DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH
 2014-2018, provided under COPERNICUS by the European Union and ESA). Free for
 non-commercial use; downloaded at run time, not redistributed.
+
+## Copernicus DEM GLO-30
+
+© DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018, provided
+under COPERNICUS by the European Union and ESA; all rights reserved. Read at
+run time from the AWS Open Data bucket `copernicus-dem-30m` (used to fill gaps
+and to convert ArcticDEM heights to sea level); not redistributed.
+
+## LINZ elevation data (New Zealand) — CC BY 4.0
+
+Toitū Te Whenua Land Information New Zealand, LiDAR 1 m DEMs and the national
+8 m DEM, read at run time from the AWS Open Data bucket `nz-elevation`.
+
+## NRCan HRDEM / MRDEM (Canada) — Open Government Licence – Canada
+
+Contains information licensed under the Open Government Licence – Canada.
+Natural Resources Canada High Resolution DEM (LiDAR mosaic) and Medium
+Resolution DEM (30 m), read at run time from `canelevation-dem`.
+
+## ArcticDEM — CC BY 4.0
+
+DEMs provided by the Polar Geospatial Center under NSF-OPP awards 1043681,
+1559691, 1542736, 1810976 and 2129685. Read at run time from the AWS Open Data
+bucket `pgc-opendata-dems`.
+
+## GSI elevation tiles (Japan)
+
+Geospatial Information Authority of Japan (国土地理院) elevation tiles
+(https://maps.gsi.go.jp/development/ichiran.html), read at run time with
+attribution as required by the GSI terms of use.
+
+## Geoscience Australia 1" DEM-H — CC BY 4.0
+
+© Commonwealth of Australia (Geoscience Australia), used as a fallback for
+Australian tiles via its public WCS service.
 
 ## tifffile / imagecodecs — BSD
 
