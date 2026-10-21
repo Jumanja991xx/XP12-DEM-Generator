@@ -51,7 +51,7 @@ jobs:
           "XP=$xp" >> $env:GITHUB_ENV
           "XP12DEM_DATA=$env:XP12DEM_DATA" >> $env:GITHUB_ENV
           $p = Start-Process -FilePath "dist\XP12DEMGenerator\XP12DEMGenerator.exe" -Wait -PassThru -ArgumentList @(
-            "build", "--tiles", "+47+011", "--name", "`"CI Smoke`"", "--resolution", "3",
+            "build", "--method", "rebuild", "--tiles", "+47+011", "--name", "`"CI Smoke`"", "--resolution", "3",
             "--mesh", "balanced", "--xplane", "`"$xp`"", "--target", "custom_scenery")
           $dsf = "$xp\Custom Scenery\z_ao_dem_ci_smoke\Earth nav data\+40+010\+47+011.dsf"
           $ok = ($p.ExitCode -eq 0) -and (Test-Path $dsf)
