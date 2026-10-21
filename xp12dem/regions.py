@@ -49,9 +49,10 @@ def dsf_relpath(lat: int, lon: int) -> str:
 
 @lru_cache(maxsize=1)
 def available_tiles() -> frozenset[Tile]:
-    """Tiles covered by Sonny's European 1" DTM mirror."""
-    data = json.loads((resources_dir() / "sonny_tiles.json").read_text(encoding="utf-8"))
-    return frozenset((int(lat), int(lon)) for lat, lon in data["tiles"])
+    """Land tiles for which at least one elevation source exists (see dem_sources)."""
+    from .dem_sources import coverage
+
+    return frozenset(coverage())
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ class Region:
     description: str
     boxes: tuple[tuple[int, int, int, int], ...]  # (lat_min, lat_max, lon_min, lon_max) inclusive
     extra: tuple[Tile, ...] = field(default=())
+    area: str = "Europe"
 
     def tiles(self) -> list[Tile]:
         found = set(self.extra)
@@ -110,6 +112,30 @@ PRESETS: tuple[Region, ...] = (
     Region("black_forest", "Black Forest & Vosges",
            "South-west Germany and Alsace low mountains.",
            ((47, 48, 6, 8),)),
+    Region("budapest", "Budapest & Danube Bend",
+           "Buda Hills, Pilis and Visegrád mountains (FABDEM).",
+           ((47, 47, 18, 19),)),
+    Region("croatia_coast", "Croatian Coast & Velebit",
+           "Rijeka to Split, Velebit and the islands (FABDEM).",
+           ((43, 45, 14, 16),)),
+    Region("colorado", "Colorado Rockies",
+           "Denver, Aspen, Vail and the high Rockies (USGS 3DEP).",
+           ((38, 40, -108, -105),), area="USA"),
+    Region("sierra_nevada", "Sierra Nevada & Yosemite",
+           "Lake Tahoe, Yosemite, Mammoth and Mt. Whitney (USGS 3DEP).",
+           ((36, 39, -121, -118),), area="USA"),
+    Region("cascades", "Seattle & Cascades",
+           "Mt. Rainier, Mt. Baker, the Olympics and Puget Sound (USGS 3DEP).",
+           ((46, 48, -124, -121),), area="USA"),
+    Region("grand_canyon", "Grand Canyon & Sedona",
+           "Grand Canyon, Page/Lake Powell and the Mogollon Rim (USGS 3DEP).",
+           ((34, 36, -113, -111),), area="USA"),
+    Region("alaska_anchorage", "Alaska - Anchorage & Chugach",
+           "Anchorage, Chugach Mountains and Prince William Sound (USGS 3DEP).",
+           ((60, 61, -151, -146),), area="USA"),
+    Region("hawaii", "Hawaii",
+           "All main Hawaiian islands (USGS 3DEP).",
+           ((18, 22, -161, -154),), area="USA"),
 )
 
 

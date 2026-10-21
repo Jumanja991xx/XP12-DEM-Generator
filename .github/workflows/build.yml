@@ -85,6 +85,21 @@ jobs:
           $diag += Get-Content "$env:XP\Custom Scenery\scenery_packs.ini"
           $text = (($diag | ForEach-Object { "$_" -replace '%', '%25' -replace "`r", '' }) -join "%0A") -replace "::", ": :"
           if ($ok) { Write-Output "::notice title=Improve smoke test::$text" } else { Write-Output "::error title=Improve smoke test::$text"; exit 1 }
+      - name: Smoke test - USGS 3DEP GeoTIFF download (USA)
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          python packaging/ci_seed_osm.py "$env:XP12DEM_DATA" 39 -106
+          $p = Start-Process -FilePath "dist\XP12DEMGenerator\XP12DEMGenerator.exe" -Wait -PassThru -ArgumentList @(
+            "build", "--method", "rebuild", "--tiles", "+39-106", "--name", "`"CI Colorado`"", "--resolution", "3",
+            "--mesh", "balanced", "--xplane", "`"$env:XP`"", "--target", "custom_scenery")
+          $manifest = "$env:XP\Custom Scenery\z_ao_dem_ci_colorado\xp12dem_pack.json"
+          $ok = ($p.ExitCode -eq 0) -and (Test-Path $manifest) -and ((Get-Content $manifest -Raw) -match "USGS")
+          $diag = @("exit=$($p.ExitCode) manifest=$(Test-Path $manifest)")
+          if (Test-Path "$env:XP12DEM_DATA\logs\cli.log") { $diag += Get-Content "$env:XP12DEM_DATA\logs\cli.log" -Tail 25 }
+          if (Test-Path $manifest) { $diag += Get-Content $manifest }
+          $text = (($diag | ForEach-Object { "$_" -replace '%', '%25' -replace "`r", '' }) -join "%0A") -replace "::", ": :"
+          if ($ok) { Write-Output "::notice title=USGS smoke test::$text" } else { Write-Output "::error title=USGS smoke test::$text"; exit 1 }
       - name: Overpass reachability (informational)
         continue-on-error: true
         timeout-minutes: 5

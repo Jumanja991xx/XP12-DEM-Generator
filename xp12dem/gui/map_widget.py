@@ -31,12 +31,13 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..paths import data_root, resources_dir
+from ..dem_sources import FABDEM, LIDAR, NATIONAL, QUALITY_TEXT, USGS, coverage
 from ..regions import Tile, available_tiles, tile_name
 
 # Scene coordinates are Web Mercator pixels at zoom BASE_ZOOM.
 BASE_ZOOM = 8
 WORLD = 256 * 2 ** BASE_ZOOM
-MIN_TILE_ZOOM, MAX_TILE_ZOOM = 3, 12
+MIN_TILE_ZOOM, MAX_TILE_ZOOM = 2, 12
 
 # Free tile services that need no API key. Both ask for an identifying
 # User-Agent, attribution and local caching, which we do.
@@ -54,9 +55,27 @@ COLOR_COAST = QColor("#5d7f69")
 COLOR_BORDER = QColor(230, 235, 240, 150)
 COLOR_COUNTRY = QColor(200, 210, 220, 150)
 COLOR_AVAILABLE = QColor(40, 130, 255, 22)
+# Tile colours by best available elevation source.
+COLOR_QUALITY = {
+    LIDAR: QColor(40, 190, 90, 70),
+    NATIONAL: QColor(30, 170, 190, 60),
+    USGS: QColor(40, 190, 90, 70),
+    FABDEM: QColor(240, 200, 40, 55),
+}
+LEGEND = (
+    (QColor(40, 190, 90), "LiDAR (Sonny / USGS 3DEP)"),
+    (QColor(30, 170, 190), "National 10-50 m model"),
+    (QColor(240, 200, 40), "FABDEM (satellite, 30 m)"),
+)
+VIEWS = {
+    "Europe": (-12, 66, 32, 36),
+    "USA": (-126, 50, -66, 24),
+    "Alaska & Hawaii": (-170, 68, -140, 18),
+    "World": (-170, 75, 180, -50),
+}
 COLOR_GRID = QColor(70, 110, 160, 130)
-COLOR_SELECTED = QColor(255, 140, 0, 110)
-COLOR_SELECTED_EDGE = QColor(230, 110, 0)
+COLOR_SELECTED = QColor(225, 40, 200, 130)
+COLOR_SELECTED_EDGE = QColor(255, 255, 255)
 COLOR_CITY = QColor(235, 240, 245, 210)
 COLOR_STATE = {
     "downloading": QColor(80, 160, 255, 150),
@@ -237,10 +256,19 @@ class TileMap(QGraphicsView):
         self._attribution.setStyleSheet(
             "background: rgba(14,20,25,200); color: #c8d4e0; font-size: 10px; padding: 2px 6px;")
         self._attribution.adjustSize()
+        self._legend = QLabel(self)
+        self._legend.setTextFormat(Qt.RichText)
+        self._legend.setText("<br>".join(
+            f"<span style='color:{c.name()}'>■</span> {text}" for c, text in LEGEND))
+        self._legend.setStyleSheet(
+            "background: rgba(14,20,25,200); color: #dfe7ef; font-size: 10px; padding: 4px 7px;"
+            "border-radius: 4px;")
+        self._legend.adjustSize()
+        self._legend.move(6, 6)
 
     # -- construction ---------------------------------------------------
     def _build_static(self) -> None:
-        land_data = json.loads((resources_dir() / "europe_land.json").read_text(encoding="utf-8"))
+        land_data = json.loads((resources_dir() / "world_land.json").read_text(encoding="utf-8"))
         land = QPainterPath()
         for ring in land_data["polygons"]:
             land.addPolygon(QPolygonF([to_scene(x, y) for x, y in ring]))
@@ -248,7 +276,7 @@ class TileMap(QGraphicsView):
         item = self._scene.addPath(land, QPen(COLOR_COAST, 0), QBrush(COLOR_LAND))
         item.setZValue(0)
 
-        borders = json.loads((resources_dir() / "europe_borders.json").read_text(encoding="utf-8"))
+        borders = json.loads((resources_dir() / "world_borders.json").read_text(encoding="utf-8"))
         path = QPainterPath()
         for line in borders["lines"]:
             path.moveTo(to_scene(*line[0]))
@@ -264,7 +292,8 @@ class TileMap(QGraphicsView):
         country_font.setPointSize(9)
         country_font.setLetterSpacing(QFont.PercentageSpacing, 110)
         for name, lon, lat, rank in borders["labels"]:
-            if rank > 5:
+            in_europe = -25 <= lon <= 45 and 34 <= lat <= 72
+            if rank > (5 if in_europe else 3):
                 continue
             label = QGraphicsSimpleTextItem(name.upper())
             label.setFont(country_font)
@@ -291,10 +320,14 @@ class TileMap(QGraphicsView):
 
         grid_pen = QPen(COLOR_GRID, 1)
         grid_pen.setCosmetic(True)
+        info = coverage()
+        brushes = {q: QBrush(c) for q, c in COLOR_QUALITY.items()}
+        fallback = QBrush(COLOR_AVAILABLE)
         for lat, lon in self._available:
-            item = self._scene.addRect(tile_rect(lat, lon), grid_pen, QBrush(COLOR_AVAILABLE))
+            quality = info[(lat, lon)].quality if (lat, lon) in info else None
+            item = self._scene.addRect(tile_rect(lat, lon), grid_pen, brushes.get(quality, fallback))
             item.setZValue(2)
-        self._scene.setSceneRect(QRectF(to_scene(-35, 75), to_scene(50, 25)))
+        self._scene.setSceneRect(QRectF(to_scene(-180, 84), to_scene(180, -60)))
 
     # -- online base map ------------------------------------------------
     def _zoom_level(self) -> int:
@@ -395,7 +428,11 @@ class TileMap(QGraphicsView):
         self._schedule_base_map()
 
     def show_all(self) -> None:
-        self.fitInView(QRectF(to_scene(-12, 66), to_scene(32, 36)), Qt.KeepAspectRatio)
+        self.show_view("Europe")
+
+    def show_view(self, name: str) -> None:
+        west, north, east, south = VIEWS[name]
+        self.fitInView(QRectF(to_scene(west, north), to_scene(east, south)), Qt.KeepAspectRatio)
         self._schedule_base_map()
 
     # -- drawing --------------------------------------------------------
@@ -421,7 +458,7 @@ class TileMap(QGraphicsView):
     def wheelEvent(self, event):  # noqa: N802 - Qt API
         factor = 1.25 if event.angleDelta().y() > 0 else 1 / 1.25
         scale = self.transform().m11() * factor
-        if 2 ** (MIN_TILE_ZOOM - BASE_ZOOM - 1) <= scale <= 2 ** (MAX_TILE_ZOOM - BASE_ZOOM + 1):
+        if 2 ** (1 - BASE_ZOOM) <= scale <= 2 ** (MAX_TILE_ZOOM - BASE_ZOOM + 1):
             self.scale(factor, factor)
             self._schedule_base_map()
 
@@ -464,9 +501,11 @@ class TileMap(QGraphicsView):
         tile = scene_to_tile(self.mapToScene(event.position().toPoint()))
         if tile in self._available:
             mark = "selected" if tile in self._selected else "available"
-            self.hovered.emit(f"Tile {tile_name(*tile)} — {mark}")
+            info = coverage().get(tile)
+            quality = QUALITY_TEXT.get(info.quality, "") if info else ""
+            self.hovered.emit(f"Tile {tile_name(*tile)} — {mark} — best data: {quality}")
         else:
-            self.hovered.emit("No Sonny DTM coverage here")
+            self.hovered.emit("No elevation data here (sea)")
         if self._paint_mode is not None:
             self._apply_paint(event)
 

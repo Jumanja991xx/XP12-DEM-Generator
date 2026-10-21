@@ -23,6 +23,24 @@ are covered by the GNU GPL v3**. The corresponding source is this repository.
   per-tile mirror https://github.com/mg4gh/hgtdata.
 * Generated scenery packs contain this attribution in their `README.txt`.
 
+## USGS 3D Elevation Program (3DEP) — public domain
+
+1 arc-second elevation tiles for the USA, downloaded at run time from
+https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1/TIFF/ .
+
+## FABDEM V1-2 — University of Bristol, non-commercial licence
+
+Hawker, Uhe, Paulo, Sosa, Savage, Sampson & Neal (2022): "A 30 m global map of
+elevation with forests and buildings removed", Environ. Res. Lett. 17 024016.
+https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn — based on
+Copernicus GLO-30 (© DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH
+2014-2018, provided under COPERNICUS by the European Union and ESA). Free for
+non-commercial use; downloaded at run time, not redistributed.
+
+## tifffile / imagecodecs — BSD
+
+https://github.com/cgohlke/tifffile , https://github.com/cgohlke/imagecodecs
+
 ## OpenStreetMap — ODbL
 
 Water, coastline, airport and road geometry used while meshing is downloaded

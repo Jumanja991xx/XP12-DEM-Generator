@@ -6,3 +6,5 @@ shapely>=2.0
 pyproj>=3.6
 rtree>=1.2
 scikit-fmm>=2023.4
+tifffile>=2024.2
+imagecodecs>=2024.1

@@ -3,8 +3,9 @@
 **High-resolution LiDAR terrain for X-Plane 12 in a few clicks — for XPME, AutoOrtho and
 default-scenery users alike.**
 
-XP12 DEM Generator downloads [Sonny's LiDAR Digital Terrain Models of Europe](https://sonny.4lima.de)
-and puts their accurate elevations into the X-Plane 12 terrain you already fly with:
+XP12 DEM Generator downloads accurate elevation data — [Sonny's LiDAR Digital Terrain Models of
+Europe](https://sonny.4lima.de), USGS 3DEP for the USA and FABDEM for the rest of the world — and
+puts it into the X-Plane 12 terrain you already fly with:
 X-Plane Map Enhancement (XPME), AutoOrtho, Ortho4XP tiles or X-Plane's default scenery.
 No Ortho4XP knowledge, no copying folders, no editing `scenery_packs.ini`.
 
@@ -61,7 +62,8 @@ very visible.
    A portable ZIP (`XP12DEMGenerator-windows.zip`) is available as well.
 2. **XPME / AutoOrtho users:** start XPME or AutoOrtho first, so its scenery folders can be
    read. The app warns you if a pack in `scenery_packs.ini` is empty (= not running).
-3. **Region** — pick a preset (Alps, Swiss Alps, Tyrol, Dolomites, Pyrenees, Norway…) or paint
+3. **Region** — pick a preset (Alps, Tyrol, Dolomites, Pyrenees, Norway, Budapest, Colorado,
+   Sierra Nevada, Cascades, Grand Canyon, Alaska, Hawaii…) or paint
    your own 1°×1° tiles on the map (OpenTopoMap / OpenStreetMap with borders, places and contour lines —
    free, no API key; offline a built-in Natural Earth map with country borders is shown).
 4. **Method & resolution** — keep *Improve my current terrain*, choose 1″ (≈30 m) or 3″ (≈90 m).
@@ -109,13 +111,31 @@ very visible.
 | Tiles in parallel | 1 – 8 | Each worker needs about 2–3 GB of RAM (measured: 2.0 GB peak for a 1″ *Maximum* tile with 4.5 M triangles). |
 | Own Sonny DTM folder | optional | Point it at `.hgt` or `.zip` files you downloaded from sonny.4lima.de (e.g. newer country releases). Missing tiles are downloaded automatically. |
 
-## Data sources
+## Elevation data sources
 
-* **Elevation:** Sonny's LiDAR DTM Europe, 1″, v24 (CC BY 4.0). Because the original site
-  distributes whole countries via Google Drive, tiles are fetched one by one from the
-  public mirror [mg4gh/hgtdata](https://github.com/mg4gh/hgtdata). The map shows which
-  tiles are available (1,056 tiles, from Iceland and Svalbard to Cyprus).
-* **Vectors (new mesh mode only):** water bodies, coastline, airports and roads from OpenStreetMap via Overpass.
+The app picks the best free source for every 1°×1° tile automatically; the map colours show it
+before you build (hover a tile for details):
+
+| Colour | Source | Where | Quality |
+|---|---|---|---|
+| 🟩 green | **Sonny's LiDAR DTM** (CC BY 4.0) | Germany, Austria, Switzerland, Italy, France, Spain, Benelux, Czechia, Slovakia, Slovenia, Poland, Romania, Denmark, UK, Ireland, … | airborne laser scanning, resampled to 1″ (~30 m) |
+| 🟩 green | **USGS 3DEP 1″** (public domain) | USA incl. Alaska, Hawaii, Puerto Rico | LiDAR / IfSAR based, downloaded per tile from the USGS bucket — no API key |
+| 🟦 teal | **Sonny's DTM — national models** | Norway, Sweden, Finland, Estonia, Latvia, Iceland | official 10–50 m terrain models |
+| 🟨 yellow | **FABDEM V1-2** (University of Bristol, non-commercial licence) | everywhere else (e.g. Hungary, Croatia, Portugal, the Balkans, Asia, …) | Copernicus 30 m with forests and buildings removed — clearly better than SRTM |
+
+* Sonny's tiles come from the per-tile mirror [mg4gh/hgtdata](https://github.com/mg4gh/hgtdata)
+  (Europe 1″ v24).
+* FABDEM is published as 10°×10° zip files. The app reads just the needed tile out of the remote
+  zip (HTTP range requests). If the server does not allow that, the build tells you exactly which
+  zip to download from [data.bris.ac.uk](https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn);
+  put it (or the extracted `.tif`) into the *Own DEM folder* and build again. Until then the tile
+  falls back to Sonny's satellite-based data, with a warning in the log.
+* **Own DEM folder** (step 2, Advanced): any `.hgt`, Sonny `.zip`, FABDEM zip/`.tif` or
+  geographic (lat/lon) GeoTIFF whose file name contains the tile (e.g. `N47E018`, `n48w122`,
+  `N47_00_E018_00`) is used first — handy for national LiDAR data you bought or downloaded.
+* All sources are converted to the same 1″ grid; 3″ is resampled from it. The pack's
+  `xp12dem_pack.json` and `README.txt` record which source each tile used.
+* **New mesh mode only:** water, coastline, airport and road geometry from OpenStreetMap via Overpass.
 
 ## Command line
 
@@ -184,6 +204,7 @@ mesh → masks → DSF.
 ## Credits and licenses
 
 * Elevation data © Sonny, https://sonny.4lima.de — CC BY 4.0
+* USGS 3D Elevation Program — public domain; FABDEM V1-2 © University of Bristol (non-commercial licence)
 * Ortho4XP © Oscar Pilote and contributors — GPL v3 (vendored in `third_party/Ortho4XP`)
 * DSFTool © Laminar Research (bundled with Ortho4XP)
 * Map data © OpenStreetMap contributors — ODbL; base map © OpenTopoMap (CC-BY-SA); offline map: Natural Earth

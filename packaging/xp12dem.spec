@@ -38,7 +38,7 @@ hiddenimports = [
     "numpy", "requests", "skfmm",
     "PIL.Image", "PIL.ImageDraw", "PIL.ImageFilter", "PIL.ImageEnhance", "PIL.ImageOps",
 ]
-for package in ("shapely", "pyproj", "rtree"):
+for package in ("shapely", "pyproj", "rtree", "tifffile", "imagecodecs"):
     pkg_datas, pkg_binaries, pkg_hidden = collect_all(package)
     datas += pkg_datas
     binaries += pkg_binaries

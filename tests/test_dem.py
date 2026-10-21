@@ -93,7 +93,7 @@ def test_store_downloads_once_and_builds_3s(tmp_path):
     store = dem.DemStore(tmp_path, session=session)
     seen = []
     path = store.ensure(47, 11, 3, progress=lambda d, t: seen.append((d, t)))
-    assert path == tmp_path / "3s" / "N47E011.hgt"
+    assert path == tmp_path / "3s" / "sonny" / "N47E011.hgt"
     assert store.has(47, 11, 1) and store.has(47, 11, 3)
     assert session.urls == [dem.MIRROR_URL.format(name="N47E011")]
     assert seen and seen[-1][0] == seen[-1][1]

@@ -241,7 +241,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(_title("1  Choose a region"))
         layout.addWidget(_hint("Pick a preset or paint your own selection on the map: left-drag "
                                "selects 1°×1° tiles, right-drag removes them, mouse wheel zooms, "
-                               "middle-drag pans. Highlighted squares are covered by Sonny's DTM."))
+                               "middle-drag pans. Square colours show the best free elevation data for each tile."))
         splitter = QSplitter(Qt.Horizontal)
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -249,11 +249,22 @@ class MainWindow(QMainWindow):
         self.region_list = QListWidget()
         self.region_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.region_list.setWordWrap(True)
+        last_area = None
         for region in regions.PRESETS:
+            if region.area != last_area:
+                header = QListWidgetItem(region.area.upper())
+                header.setFlags(Qt.NoItemFlags)
+                header.setData(Qt.UserRole, None)
+                self.region_list.addItem(header)
+                last_area = region.area
             item = QListWidgetItem(f"{region.name}  ({len(region.tiles())} tiles)")
             item.setData(Qt.UserRole, region.key)
             item.setToolTip(region.description)
             self.region_list.addItem(item)
+        header = QListWidgetItem("OTHER")
+        header.setFlags(Qt.NoItemFlags)
+        header.setData(Qt.UserRole, None)
+        self.region_list.addItem(header)
         custom = QListWidgetItem("Custom selection")
         custom.setData(Qt.UserRole, CUSTOM_KEY)
         self.region_list.addItem(custom)
@@ -268,10 +279,11 @@ class MainWindow(QMainWindow):
         buttons = QHBoxLayout()
         clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(lambda: self.map.set_selected([], focus=False))
-        all_btn = QPushButton("Show Europe")
-        all_btn.clicked.connect(lambda: self.map.show_all())
         buttons.addWidget(clear_btn)
-        buttons.addWidget(all_btn)
+        for view in ("Europe", "USA", "World"):
+            btn = QPushButton(view)
+            btn.clicked.connect(lambda _=False, v=view: self.map.show_view(v))
+            buttons.addWidget(btn)
         left_layout.addLayout(buttons)
         splitter.addWidget(left)
 
@@ -294,6 +306,8 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         key = item.data(Qt.UserRole)
+        if key is None:  # group header
+            return
         if key == CUSTOM_KEY:
             self.region_desc.setText("Your own tile selection.")
             if not self.name_edit.text() or self._name_is_preset():
@@ -314,7 +328,7 @@ class MainWindow(QMainWindow):
     def _map_changed(self) -> None:
         if not self._suppress_custom:
             current = self.region_list.currentItem()
-            if current is not None and current.data(Qt.UserRole) != CUSTOM_KEY:
+            if current is not None and current.data(Qt.UserRole) not in (None, CUSTOM_KEY):
                 region = regions.preset(current.data(Qt.UserRole))
                 if sorted(region.tiles()) != self.map.selected():
                     self.region_list.blockSignals(True)
@@ -385,8 +399,10 @@ class MainWindow(QMainWindow):
         browse.clicked.connect(self._choose_dem_folder)
         folder_row.addWidget(browse)
         grid.addLayout(folder_row, 1, 1, 1, 2)
-        grid.addWidget(_hint("Use this if you downloaded newer country releases (1\" .hgt or .zip) "
-                             "from sonny.4lima.de yourself; missing tiles are still downloaded."), 2, 0, 1, 3)
+        grid.addWidget(_hint("Optional folder with your own elevation files: Sonny .hgt/.zip, FABDEM "
+                             "zips or .tif tiles, or any lat/lon GeoTIFF whose name contains the tile "
+                             "(e.g. N47E018). Files found here are preferred; everything else is "
+                             "downloaded automatically."), 2, 0, 1, 3)
         grid.setColumnStretch(2, 1)
         layout.addWidget(advanced)
         layout.addStretch(1)
@@ -553,6 +569,7 @@ class MainWindow(QMainWindow):
                      else f"Mesh: new Ortho4XP mesh ({detail.label})")
         self.summary_label.setText(
             f"<b>{name}</b> &nbsp;→ scenery pack <code>{pack_name(slug, method)}</code><br>"
+            f"{self._quality_summary(tiles)}<br>"
             f"{len(tiles)} tile(s): {regions.bounds(tiles)} &nbsp;·&nbsp; "
             f"DEM: {res.label} &nbsp;·&nbsp; {mesh_text}<br>"
             f"Download ≈ {download_mb} MB &nbsp;·&nbsp; Disk ≈ {disk_mb} MB &nbsp;·&nbsp; "
@@ -590,6 +607,24 @@ class MainWindow(QMainWindow):
         target_ok = self._target() is not None
         busy = self.thread is not None and self.thread.isRunning()
         self.create_btn.setEnabled(bool(tiles) and target_ok and not busy)
+
+    @staticmethod
+    def _quality_summary(tiles) -> str:
+        from ..dem_sources import FABDEM, LIDAR, NATIONAL, USGS, coverage
+
+        names = {LIDAR: "LiDAR (Sonny)", USGS: "LiDAR (USGS 3DEP)", NATIONAL: "national 10-50 m",
+                 FABDEM: "FABDEM"}
+        counts: dict[str, int] = {}
+        for tile in tiles:
+            info = coverage().get(tile)
+            if info:
+                counts[info.quality] = counts.get(info.quality, 0) + 1
+        text = "Elevation data: " + ", ".join(
+            f"{counts[q]} × {names[q]}" for q in (LIDAR, USGS, NATIONAL, FABDEM) if q in counts)
+        if FABDEM in counts:
+            text += (" &nbsp;<span style='color:#f0c040'>FABDEM: satellite based (30 m), "
+                     "non-commercial licence - fine for private use</span>")
+        return text
 
     def _minutes(self, count: int) -> float:
         if self._method_key() == "improve":
@@ -834,7 +869,7 @@ class MainWindow(QMainWindow):
             card.radio.setChecked(card.key == s.method)
         self._method_changed()
         keys = [self.region_list.item(i).data(Qt.UserRole) for i in range(self.region_list.count())]
-        row = keys.index(s.last_region) if s.last_region in keys else 0
+        row = keys.index(s.last_region) if s.last_region in keys else keys.index("tyrol")
         self.region_list.setCurrentRow(row)
 
     def _save_choices(self) -> None:

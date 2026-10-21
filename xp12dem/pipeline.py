@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import paths
-from .dem import Cancelled, DemStore, resolution
+from .dem import Cancelled, DemStore, resolution, source_label
 from .installer import IMPROVE_PREFIX, InstallTarget, assemble_pack, install_pack, pack_name
 from .o4x_worker import PROGRESS_PREFIX
 from .regions import Tile, tile_name
@@ -136,6 +136,7 @@ class Pipeline:
         self._lock = threading.Lock()
         self._tile_fraction: dict[Tile, float] = {}  # floor from step/log events
         self._tile_started: dict[Tile, float] = {}
+        self.dem_sources: dict[Tile, str] = {}  # tile -> elevation source used
         self._durations: list[float] = []
         self._expected = 120.0
         self._on_partial = lambda: None
@@ -200,8 +201,12 @@ class Pipeline:
                     self.events.progress(base + min(done / total, 1.0) * 0.95 * W_DOWNLOAD, total_units)
 
             try:
-                dem_files[tile] = store.ensure(tile[0], tile[1], res.arcsec, on_bytes, self.cancel_event)
-                self.events.log(f"DEM {tile_name(*tile)} ready: {dem_files[tile].name}")
+                dem_files[tile], source = store.ensure_with_source(tile[0], tile[1], res.arcsec,
+                                                                   on_bytes, self.cancel_event)
+                self.dem_sources[tile] = source_label(source, *tile)
+                self.events.log(f"DEM {tile_name(*tile)} ready: {self.dem_sources[tile]}")
+                while store.warnings:
+                    self.events.log(f"warning - {store.warnings.pop(0)}")
                 self.events.tile_state(tile, "dem_ready")
                 bump(W_DOWNLOAD)
             except Cancelled:
@@ -284,7 +289,8 @@ class Pipeline:
         assemble_pack(tile_dirs, staged, region_name=req.region_name,
                       resolution_label=res.label,
                       mesh_label="unchanged (existing mesh)" if improve else detail.label,
-                      sources={t: sources[t].label for t in tile_dirs} if improve else None)
+                      sources={t: sources[t].label for t in tile_dirs} if improve else None,
+                      dem_sources={t: self.dem_sources.get(t, "") for t in tile_dirs})
         if req.install:
             self.events.stage("Installing into X-Plane 12")
             above = {src.name for t, src in sources.items() if t in tile_dirs and src.kind == "pack"}
