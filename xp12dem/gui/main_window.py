@@ -1047,9 +1047,14 @@ class MainWindow(QMainWindow):
         ao_mode = self.target_ao.isChecked() and not improve
         failed = ""
         if result.failed_tiles:
-            failed = ("<p style='color:#ff8a65'><b>Some tiles failed:</b><br>" +
-                      "<br>".join(f"{regions.tile_name(*t)}: {m}" for t, m in result.failed_tiles.items())
-                      + "</p>")
+            from ..pipeline import short_error
+
+            failed = ("<p style='color:#ff8a65'><b>Some tiles failed</b> - they simply keep their "
+                      "previous terrain, nothing else is affected:<br>" +
+                      "<br>".join(f"{regions.tile_name(*t)}: {short_error(m)}"
+                                  for t, m in result.failed_tiles.items())
+                      + "<br><span style='color:#9fb0c0'>Full details are in the log on the Create "
+                      "page. Try <b>Retry failed tiles</b>, or 3\" resolution for these tiles.</span></p>")
         if improve:
             steps = ("<li>Keep the original scenery installed - XPME / AutoOrtho still deliver "
                      "the textures. If XPME re-orders scenery_packs.ini, make sure "

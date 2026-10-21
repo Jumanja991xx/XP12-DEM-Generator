@@ -422,11 +422,35 @@ class ReheightStats:
     mean_abs_delta: float = 0.0
     copied_terrains: int = 0
     rasters: int = 0
+    heights_range: Optional[tuple[float, float]] = None  # storable heights of the new DSF
+    clamped: int = 0  # vertices limited to the original height range (fallback mode)
+
+
+def heights_range(step: float, offset: float) -> tuple[float, float]:
+    """Elevations a DSF can store according to its ``HEIGHTS step offset`` line."""
+    return offset, offset + step * 65535.0
+
+
+def tight_heights(need_lo: float, need_hi: float) -> tuple[float, float]:
+    """``(step, offset)`` of a ``HEIGHTS`` line covering exactly the heights of a tile.
+
+    DSFTool stores elevations as 16-bit steps within this range and refuses
+    ("could not sink vertex") anything outside it - e.g. LiDAR heights below
+    sea level in reclaimed land (Po delta, Netherlands) when the source mesh
+    never went below 0 m. A tight range also gives the finest height steps.
+    """
+    lo, hi = math.floor(need_lo) - 2.0, math.ceil(need_hi) + 2.0
+    return (hi - lo) / 65535.0, lo
 
 
 def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: MeshSource,
-                      out_pack: Path, work: Path, log: Log = print) -> ReheightStats:
-    """Rewrite a DSFTool text file with LiDAR elevations."""
+                      out_pack: Path, work: Path, log: Log = print,
+                      keep_height_range: bool = False) -> ReheightStats:
+    """Rewrite a DSFTool text file with LiDAR elevations.
+
+    ``keep_height_range`` is the fallback mode: instead of widening the DSF's
+    storable height range, new heights are limited to the original range.
+    """
     stats = ReheightStats()
     defs: list[str] = []
     water_ids: set[int] = set()
@@ -434,13 +458,27 @@ def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: Mes
     # Pass 1: terrain definitions and vertices on water patches.
     water_keys: set[tuple[int, int]] = set()
     current_water = False
+    orig_lo, orig_hi = math.inf, -math.inf
+    other_lo, other_hi = math.inf, -math.inf  # "use raster" markers, objects: must stay storable
     with open(src_txt, "r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
             if line.startswith("PATCH_VERTEX"):
+                elev = float(line.split(None, 4)[3])
+                if elev > NODATA + 1:
+                    orig_lo, orig_hi = min(orig_lo, elev), max(orig_hi, elev)
+                else:
+                    other_lo, other_hi = min(other_lo, elev), max(other_hi, elev)
                 if current_water:
                     p = line.split(None, 3)
                     water_keys.add((round(float(p[1]) * 1e7), round(float(p[2]) * 1e7)))
-            elif line.startswith("TERRAIN_DEF"):
+                continue
+            if line.startswith(("OBJECT_MSL", "OBJECT_AGL")):
+                parts = line.split()
+                if len(parts) >= 6:
+                    elev = float(parts[5])
+                    other_lo, other_hi = min(other_lo, elev), max(other_hi, elev)
+                continue
+            if line.startswith("TERRAIN_DEF"):
                 name = line.split(None, 1)[1].strip()
                 if name.lower() in WATER_DEFS or (
                         not name.startswith(LIB_PREFIXES) and _is_water_ter(source.read_root / name)):
@@ -462,8 +500,18 @@ def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: Mes
                                encoding="utf-8")
                 stats.copied_terrains += 1
 
+    # Height range the new DSF must be able to store.
+    finite = hf.grid[np.isfinite(hf.grid)]
+    if orig_lo > orig_hi:  # no vertex heights at all (raster-only mesh)
+        orig_lo, orig_hi = 0.0, 0.0
+    need_lo = min(orig_lo, float(finite.min())) if finite.size else orig_lo
+    need_hi = max(orig_hi, float(finite.max())) if finite.size else orig_hi
+    need_lo, need_hi = min(need_lo, other_lo), max(need_hi, other_hi)
+    heights_line = "HEIGHTS {:.9f} {:.1f}\n".format(*tight_heights(need_lo, need_hi))
+
     # Pass 2: write the new text file.
     deltas: list[float] = []
+    saw_heights = False
     current_water = False
     buffer: list[str] = []
 
@@ -495,6 +543,10 @@ def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: Mes
             d = np.abs(target - elev)[changed]
             stats.max_delta = max(stats.max_delta, float(d.max()))
             deltas.append(float(d.sum()))
+        if keep_height_range:
+            limited = np.clip(target, orig_lo, orig_hi)
+            stats.clamped += int((valid & (limited != target)).sum())
+            target = np.where(valid, limited, target)
         arr[:, 2] = target
         if arr.shape[1] >= 5:
             plausible = (np.abs(arr[:, 3]) <= 1.0) & (np.abs(arr[:, 4]) <= 1.0)
@@ -525,6 +577,14 @@ def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: Mes
                     flush()
                 continue
             flush()
+            if not keep_height_range:
+                if line.startswith("HEIGHTS"):
+                    continue  # replaced by our own line (written before the first PROPERTY)
+                if line.startswith("PROPERTY") and not saw_heights:
+                    saw_heights = True
+                    out.write(heights_line)
+                    step, offset = tight_heights(need_lo, need_hi)
+                    stats.heights_range = (offset, offset + step * 65535.0)
             if line.startswith("BEGIN_PATCH"):
                 current_water = int(line.split()[1]) in water_ids
             elif line.startswith("RASTER_DATA"):
@@ -586,6 +646,13 @@ def _rewrite_raster(line: str, hf: HeightField, work: Path, stats: ReheightStats
 # ---------------------------------------------------------------------------
 # One tile end to end
 # ---------------------------------------------------------------------------
+def _first_error(text: str) -> str:
+    for line in text.splitlines():
+        if "ERROR" in line:
+            return line.strip().strip('!"').replace("\\n", "").strip()[:120]
+    return text.strip().splitlines()[-1][:120] if text.strip() else "unknown error"
+
+
 def reheight_tile(tile: Tile, source: MeshSource, hf: HeightField, out_pack: Path,
                   work: Path, dsftool: str, seven_zip: Optional[str],
                   log: Log = print) -> ReheightStats:
@@ -600,10 +667,23 @@ def reheight_tile(tile: Tile, source: MeshSource, hf: HeightField, out_pack: Pat
     run_dsftool(dsftool, "--dsf2text", str(plain), str(src_txt))
     log("   applying LiDAR elevations")
     stats = reheight_dsf_text(src_txt, dst_txt, hf, source, out_pack, work, log)
+    if stats.heights_range:
+        lo, hi = stats.heights_range
+        log(f"   height range widened to {lo:.0f} .. {hi:.0f} m (LiDAR goes beyond the original mesh)")
     target = out_pack / dsf_relpath(*tile)
     target.parent.mkdir(parents=True, exist_ok=True)
     log("   writing new DSF")
-    run_dsftool(dsftool, "--text2dsf", str(dst_txt), str(target))
+    try:
+        run_dsftool(dsftool, "--text2dsf", str(dst_txt), str(target))
+    except RuntimeError as exc:
+        # Fallback: keep the source's height range and limit new heights to it.
+        log(f"   DSFTool refused the new heights ({_first_error(str(exc))}) - "
+            "retrying with heights limited to the original range")
+        stats = reheight_dsf_text(src_txt, dst_txt, hf, source, out_pack, work, log,
+                                  keep_height_range=True)
+        log(f"   {stats.clamped} vertices limited")
+        log("   writing new DSF (fallback)")
+        run_dsftool(dsftool, "--text2dsf", str(dst_txt), str(target))
     for tmp in (src_txt, dst_txt):
         tmp.unlink(missing_ok=True)
     if plain != source.dsf:

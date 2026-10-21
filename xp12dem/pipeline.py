@@ -102,6 +102,21 @@ class BuildResult:
     seconds: float = 0.0
 
 
+def short_error(message: str, limit: int = 200) -> str:
+    """One readable line of a (possibly multi-line tool) error message."""
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    if not lines:
+        return "unknown error"
+    head = lines[0].split(" failed:")[0] + (" failed" if " failed:" in lines[0] else "")
+    detail = next((line for line in lines if "ERROR" in line), "")
+    detail = detail.replace('!"', "").replace('\\n"', "").replace('\\n', "").strip(' "')
+    while detail.startswith("ERROR: ERROR:"):
+        detail = detail[len("ERROR: "):]
+    detail = detail.rstrip(":").strip()
+    text = f"{head}: {detail}" if detail and detail not in head else lines[0]
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 def code_ok(proc: subprocess.Popen) -> bool:
     return proc.poll() == 0
 

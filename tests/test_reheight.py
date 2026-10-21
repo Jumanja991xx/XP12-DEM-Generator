@@ -182,3 +182,136 @@ def test_external_install_target_writes_absolute_entry(tmp_path):
     lines = ["I", "1000 Version", "SCENERY", "", f"SCENERY_PACK {parent.as_posix()}/XPME_Europe/"]
     out = installer.insert_pack_line(lines, "z_dem_x", {"XPME_Europe"}, target.ini_entry("z_dem_x"))
     assert out[4] == f"SCENERY_PACK {parent.as_posix()}/z_dem_x/"
+
+
+DSF_TEXT = """I
+800
+DSF2TEXT
+
+PROPERTY sim/planet earth
+PROPERTY sim/overlay 0
+PROPERTY sim/west 11
+PROPERTY sim/east 12
+PROPERTY sim/north 46
+PROPERTY sim/south 45
+DIVISIONS 8
+HEIGHTS 0.05000 0.0
+TERRAIN_DEF terrain_Water
+TERRAIN_DEF lib/g10/terrain10/fake.ter
+BEGIN_PATCH 1 0.0 -1.0 1 5
+BEGIN_PRIMITIVE 0
+PATCH_VERTEX 11.95 45.09 1.0 0.0 0.0
+PATCH_VERTEX 11.96 45.09 2.0 0.0 0.0
+PATCH_VERTEX 11.95 45.10 1.5 0.0 0.0
+PATCH_VERTEX 11.20 45.80 3000.0 0.0 0.0
+PATCH_VERTEX 11.21 45.80 3000.0 0.0 0.0
+PATCH_VERTEX 11.20 45.81 3000.0 0.0 0.0
+END_PRIMITIVE
+END_PATCH
+"""
+
+
+def _dsftool():
+    from xp12dem import paths
+
+    tool, _ = RH.platform_tools(paths.ortho4xp_root())
+    try:
+        RH.run_dsftool(tool, "--version")
+    except Exception:
+        pass
+    import os
+    if not os.path.isfile(tool) or not os.access(tool, os.X_OK):
+        pytest.skip("DSFTool not runnable here")
+    return tool
+
+
+@pytest.mark.parametrize("heights_line", ["HEIGHTS 0.05000 0.0\n", ""])
+def test_heights_below_sea_level_and_above_range_are_written(tmp_path, heights_line):
+    """Po delta / Netherlands: LiDAR below 0 m, while the source mesh never was."""
+    tool = _dsftool()
+    text = tmp_path / "src.txt"
+    text.write_text(DSF_TEXT.replace("HEIGHTS 0.05000 0.0\n", heights_line))
+    src_dsf = tmp_path / "src" / "+45+011.dsf"
+    src_dsf.parent.mkdir()
+    RH.run_dsftool(tool, "--text2dsf", str(text), str(src_dsf))
+
+    grid = np.full((121, 121), -1.5, dtype=np.float32)  # reclaimed land
+    grid[:30, :30] = 3400.0  # north-west: higher than 0.05 * 65535 = 3276 m
+    hf = RH.HeightField(45, 11, grid, feather_edges={k: False for k in "nsew"})
+    source = RH.MeshSource("pack", "XPME_Europe", src_dsf, tmp_path)
+    out_pack = tmp_path / "pack"
+    stats = RH.reheight_tile((45, 11), source, hf, out_pack, tmp_path / "work", tool, None,
+                             log=lambda *_: None)
+    assert stats.heights_range[0] < -1.5 and stats.clamped == 0
+    result = tmp_path / "result.txt"
+    RH.run_dsftool(tool, "--dsf2text", str(out_pack / "Earth nav data" / "+40+010" / "+45+011.dsf"),
+                   str(result))
+    elev = [float(line.split()[3]) for line in result.read_text().splitlines()
+            if line.startswith("PATCH_VERTEX")]
+    assert min(elev) == pytest.approx(-1.5, abs=0.1)
+    assert max(elev) == pytest.approx(3400.0, abs=0.5)
+
+
+def test_tight_heights():
+    step, offset = RH.tight_heights(-1.5, 3400.2)
+    assert offset == -4.0 and offset + step * 65535 == pytest.approx(3403.0)
+    assert step < 0.06  # far finer than DSFTool's default 1 m steps
+
+
+def test_raster_marker_vertices_still_fit(tmp_path):
+    tool = _dsftool()
+    text = tmp_path / "src.txt"
+    text.write_text(DSF_TEXT.replace("HEIGHTS 0.05000 0.0", "HEIGHTS 1.0 -32768.0").replace(
+        "PATCH_VERTEX 11.20 45.80 3000.0", "PATCH_VERTEX 11.20 45.80 -32768.0"))
+    src_dsf = tmp_path / "src" / "+45+011.dsf"
+    src_dsf.parent.mkdir()
+    RH.run_dsftool(tool, "--text2dsf", str(text), str(src_dsf))
+    hf = RH.HeightField(45, 11, np.full((121, 121), -1.5, dtype=np.float32),
+                        feather_edges={k: False for k in "nsew"})
+    source = RH.MeshSource("pack", "XPME_Europe", src_dsf, tmp_path)
+    RH.reheight_tile((45, 11), source, hf, tmp_path / "pack", tmp_path / "work", tool, None,
+                     log=lambda *_: None)
+    result = tmp_path / "result.txt"
+    RH.run_dsftool(tool, "--dsf2text",
+                   str(tmp_path / "pack" / "Earth nav data" / "+40+010" / "+45+011.dsf"), str(result))
+    elev = sorted(float(line.split()[3]) for line in result.read_text().splitlines()
+                  if line.startswith("PATCH_VERTEX"))
+    assert elev[0] == pytest.approx(-32768.0, abs=1) and elev[1] == pytest.approx(-1.5, abs=0.6)
+
+
+def test_fallback_limits_heights_when_dsftool_refuses(tmp_path, monkeypatch):
+    tool = _dsftool()
+    text = tmp_path / "src.txt"
+    text.write_text(DSF_TEXT)
+    src_dsf = tmp_path / "src" / "+45+011.dsf"
+    src_dsf.parent.mkdir()
+    RH.run_dsftool(tool, "--text2dsf", str(text), str(src_dsf))
+    real = RH.run_dsftool
+    calls = []
+
+    def flaky(tool_path, *args):
+        if args[0] == "--text2dsf":
+            calls.append(args)
+            if len(calls) == 1:
+                raise RuntimeError('DSFTool --text2dsf failed: x\nERROR: !"ERROR: could not sink vertex:\\n"')
+        return real(tool_path, *args)
+
+    monkeypatch.setattr(RH, "run_dsftool", flaky)
+    logs = []
+    hf = RH.HeightField(45, 11, np.full((121, 121), -1.5, dtype=np.float32),
+                        feather_edges={k: False for k in "nsew"})
+    source = RH.MeshSource("pack", "XPME_Europe", src_dsf, tmp_path)
+    stats = RH.reheight_tile((45, 11), source, hf, tmp_path / "pack", tmp_path / "work", tool, None,
+                             log=logs.append)
+    assert len(calls) == 2 and stats.clamped > 0
+    assert any("could not sink vertex" in line and "retrying" in line for line in logs)
+
+
+def test_short_error_for_dsftool_dump():
+    from xp12dem.pipeline import short_error
+
+    message = ('RuntimeError: DSFTool --text2dsf failed: ator\\ortho4xp\\+45+011.dsf\n'
+               'Scanning for dimension properties...\n 11.95,45.08,-1.53\n'
+               'ERROR: !"ERROR: could not sink vertex:\\n"\n(D:\\a\\DSFLibWrite.cpp, 834.)')
+    assert short_error(message) == "RuntimeError: DSFTool --text2dsf failed: ERROR: could not sink vertex"
+    assert short_error("No elevation data for N47E011") == "No elevation data for N47E011"
