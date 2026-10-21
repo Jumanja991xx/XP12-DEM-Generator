@@ -1,0 +1,68 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Unit tests
+        run: python -m pytest -q
+      - name: Build executables
+        run: pyinstaller --noconfirm packaging/xp12dem.spec
+      - name: Smoke test - build one real tile with the packaged app
+        shell: pwsh
+        run: |
+          $xp = Join-Path $env:RUNNER_TEMP "X-Plane 12"
+          New-Item -ItemType Directory -Force -Path "$xp\Custom Scenery", "$xp\Global Scenery\X-Plane 12 Global Scenery" | Out-Null
+          $env:XP12DEM_DATA = Join-Path $env:RUNNER_TEMP "xp12dem data"
+          $p = Start-Process -FilePath "dist\XP12DEMGenerator\XP12DEMGenerator.exe" -Wait -PassThru -ArgumentList @(
+            "build", "--tiles", "+47+011", "--name", "CI Smoke", "--resolution", "3",
+            "--mesh", "balanced", "--xplane", "`"$xp`"", "--target", "custom_scenery")
+          Get-ChildItem -Recurse "$env:XP12DEM_DATA\logs" | ForEach-Object { Get-Content $_.FullName -Tail 40 }
+          $dsf = "$xp\Custom Scenery\z_ao_dem_ci_smoke\Earth nav data\+40+010\+47+011.dsf"
+          if ($p.ExitCode -ne 0 -or -not (Test-Path $dsf)) { throw "Smoke build failed (exit $($p.ExitCode))" }
+          Get-Content "$xp\Custom Scenery\scenery_packs.ini"
+          "DSF size: $((Get-Item $dsf).Length) bytes"
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item README.md, LICENSE, THIRD_PARTY_NOTICES.md dist\XP12DEMGenerator\
+          Compress-Archive -Path dist\XP12DEMGenerator -DestinationPath XP12DEMGenerator-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XP12DEMGenerator-windows
+          path: XP12DEMGenerator-windows.zip
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: XP12DEMGenerator-windows.zip
+          generate_release_notes: true

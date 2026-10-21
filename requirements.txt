@@ -1,0 +1,8 @@
+PySide6>=6.6
+numpy>=1.26
+requests>=2.31
+Pillow>=10.0
+shapely>=2.0
+pyproj>=3.6
+rtree>=1.2
+scikit-fmm>=2023.4

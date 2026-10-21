@@ -1,0 +1,10 @@
+[project]
+name = "xp12-dem-generator"
+version = "0.1.0"
+description = "Build X-Plane 12 terrain meshes from Sonny's LiDAR DTMs for AutoOrtho"
+readme = "README.md"
+license = { text = "MIT (application) / GPL-3.0 (bundled Ortho4XP)" }
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
