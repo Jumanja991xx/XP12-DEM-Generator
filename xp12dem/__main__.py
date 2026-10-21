@@ -13,7 +13,20 @@ import sys
 from pathlib import Path
 
 
+def _ensure_console_output() -> None:
+    """The windowed Windows executable has no stdout; log to a file instead."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    from .paths import log_dir
+
+    log_dir().mkdir(parents=True, exist_ok=True)
+    stream = open(log_dir() / "cli.log", "w", encoding="utf-8", buffering=1)
+    sys.stdout = sys.stdout or stream
+    sys.stderr = sys.stderr or stream
+
+
 def _cli_build(argv: list[str]) -> int:
+    _ensure_console_output()
     from . import regions
     from .installer import InstallTarget
     from .pipeline import BuildRequest, Events, MESH_DETAILS, Pipeline
@@ -55,6 +68,8 @@ def _cli_build(argv: list[str]) -> int:
                            target=target, local_dem_source=args.dem_folder,
                            parallel=args.parallel, install=not args.no_install)
     result = Pipeline(request, Events()).run()
+    for tile, message in result.failed_tiles.items():
+        print(f"FAILED {regions.tile_name(*tile)}: {message}")
     print(f"Built {len(result.ok_tiles)} tile(s), failed {len(result.failed_tiles)}, "
           f"in {result.seconds / 60:.1f} min -> {result.installed_to}")
     return 0 if result.ok_tiles and not result.failed_tiles else 1

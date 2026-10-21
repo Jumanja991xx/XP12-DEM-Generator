@@ -46,11 +46,19 @@ jobs:
           $p = Start-Process -FilePath "dist\XP12DEMGenerator\XP12DEMGenerator.exe" -Wait -PassThru -ArgumentList @(
             "build", "--tiles", "+47+011", "--name", "CI Smoke", "--resolution", "3",
             "--mesh", "balanced", "--xplane", "`"$xp`"", "--target", "custom_scenery")
-          Get-ChildItem -Recurse "$env:XP12DEM_DATA\logs" | ForEach-Object { Get-Content $_.FullName -Tail 40 }
           $dsf = "$xp\Custom Scenery\z_ao_dem_ci_smoke\Earth nav data\+40+010\+47+011.dsf"
-          if ($p.ExitCode -ne 0 -or -not (Test-Path $dsf)) { throw "Smoke build failed (exit $($p.ExitCode))" }
-          Get-Content "$xp\Custom Scenery\scenery_packs.ini"
-          "DSF size: $((Get-Item $dsf).Length) bytes"
+          $ok = ($p.ExitCode -eq 0) -and (Test-Path $dsf)
+          # Collect diagnostics and surface them as an annotation (readable via the API).
+          $diag = @("exit=$($p.ExitCode) dsf=$(Test-Path $dsf)")
+          if (Test-Path "$env:XP12DEM_DATA\logs") {
+            Get-ChildItem -Recurse -File "$env:XP12DEM_DATA\logs" | ForEach-Object {
+              $diag += "== $($_.Name)"
+              $diag += Get-Content $_.FullName -Tail 25 | Where-Object { $_ -notmatch '"kind": "bar"' }
+            }
+          } else { $diag += "no log folder" }
+          if (Test-Path "$xp\Custom Scenery\scenery_packs.ini") { $diag += Get-Content "$xp\Custom Scenery\scenery_packs.ini" }
+          $text = (($diag | ForEach-Object { "$_" -replace '%', '%25' -replace "`r", '' }) -join "%0A") -replace "::", ": :"
+          if ($ok) { Write-Output "::notice title=Smoke test::$text" } else { Write-Output "::error title=Smoke test::$text"; exit 1 }
       - name: Package
         shell: pwsh
         run: |

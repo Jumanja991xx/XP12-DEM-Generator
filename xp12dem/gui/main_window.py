@@ -336,7 +336,7 @@ class MainWindow(QMainWindow):
         self.parallel_spin.setRange(1, max(1, min(8, (os.cpu_count() or 2) // 2)))
         self.parallel_spin.valueChanged.connect(lambda *_: self._update_status())
         grid.addWidget(self.parallel_spin, 0, 1)
-        grid.addWidget(_hint("Each parallel tile needs about 3-4 GB of RAM."), 0, 2)
+        grid.addWidget(_hint("Each parallel tile needs about 2-3 GB of RAM."), 0, 2)
         grid.addWidget(QLabel("Own Sonny DTM folder"), 1, 0)
         folder_row = QHBoxLayout()
         self.dem_folder_edit = QLineEdit()

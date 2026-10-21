@@ -68,7 +68,7 @@ Overpass API). A 1°×1° tile takes roughly 2–6 minutes depending on the sett
 |---|---|---|
 | DEM resolution | **1″** (≈30 m) · **3″** (≈90 m) | 3″ is resampled from Sonny's 1″ data (3×3 mean). |
 | Mesh detail | **Balanced** · **High** · **Maximum** | Ortho4XP `curvature_tol` 2.0 / 1.2 / 0.8 and `limit_tris` 3 / 4 / 5 M triangles per tile. *Balanced* matches the stock AutoOrtho packs, *High* is a good VFR default. |
-| Tiles in parallel | 1 – 8 | Each Ortho4XP worker needs a few GB of RAM. |
+| Tiles in parallel | 1 – 8 | Each Ortho4XP worker needs about 2–3 GB of RAM (measured: 2.0 GB peak for a 1″ *Maximum* tile with 4.5 M triangles). |
 | Own Sonny DTM folder | optional | Point it at `.hgt` or `.zip` files you downloaded from sonny.4lima.de (e.g. newer country releases). Missing tiles are downloaded automatically. |
 
 The XP12-specific parts are handled for you: water uses Ortho4XP's *XP12* water
