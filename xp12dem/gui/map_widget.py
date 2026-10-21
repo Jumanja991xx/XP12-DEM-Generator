@@ -26,12 +26,13 @@ from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QGraphicsItem, QGraphicsPixmapItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
-    QLabel,
+    QLabel, QToolButton,
 )
 
 from .. import __version__
 from ..paths import data_root, resources_dir
 from ..dem_sources import FABDEM, LIDAR, NATIONAL, QUALITY_TEXT, USGS, coverage
+from ..inventory import Inventory
 from ..regions import Tile, available_tiles, tile_name
 
 # Scene coordinates are Web Mercator pixels at zoom BASE_ZOOM.
@@ -63,10 +64,16 @@ COLOR_QUALITY = {
     FABDEM: QColor(240, 200, 40, 55),
 }
 LEGEND = (
-    (QColor(40, 190, 90), "LiDAR (Sonny / USGS 3DEP)"),
-    (QColor(30, 170, 190), "National 10-50 m model"),
-    (QColor(240, 200, 40), "FABDEM (satellite, 30 m)"),
+    (QColor(40, 190, 90), "■", "LiDAR (Sonny / USGS 3DEP)"),
+    (QColor(30, 170, 190), "■", "National 10-50 m model"),
+    (QColor(240, 200, 40), "■", "FABDEM (satellite, 30 m)"),
+    (QColor(80, 255, 140), "▨", "Already installed"),
+    (QColor(140, 200, 255), "⬚", "Elevation data downloaded"),
 )
+COLOR_INSTALLED = QColor(80, 255, 140)
+COLOR_CACHED = QColor(140, 200, 255, 220)
+# pixels the mouse may move before a left click becomes a drag (pan)
+CLICK_SLOP = 5
 VIEWS = {
     "Europe": (-12, 66, 32, 36),
     "USA": (-126, 50, -66, 24),
@@ -213,8 +220,8 @@ class TileFetcher(QObject):
 # Map view
 # ---------------------------------------------------------------------------
 class TileMap(QGraphicsView):
-    """Left click/drag selects tiles, right click/drag deselects, wheel zooms,
-    middle drag pans."""
+    """Works like a normal web map: drag to move, wheel (or +/-) to zoom.
+    A click toggles a tile; Shift+drag paints a selection, right-drag erases."""
 
     selectionChanged = Signal()
     hovered = Signal(str)
@@ -240,6 +247,10 @@ class TileMap(QGraphicsView):
         self._paint_mode: Optional[bool] = None
         self._editable = True
         self._pan_start = None
+        self._press_pos: Optional[QPointF] = None
+        self._press_tile: Optional[Tile] = None
+        self._inventory = Inventory()
+        self._inventory_items: list[QGraphicsItem] = []
         self._build_static()
 
         self._fetcher: Optional[TileFetcher] = None
@@ -259,12 +270,25 @@ class TileMap(QGraphicsView):
         self._legend = QLabel(self)
         self._legend.setTextFormat(Qt.RichText)
         self._legend.setText("<br>".join(
-            f"<span style='color:{c.name()}'>■</span> {text}" for c, text in LEGEND))
+            f"<span style='color:{c.name()}'>{mark}</span> {text}" for c, mark, text in LEGEND))
         self._legend.setStyleSheet(
             "background: rgba(14,20,25,200); color: #dfe7ef; font-size: 10px; padding: 4px 7px;"
             "border-radius: 4px;")
         self._legend.adjustSize()
         self._legend.move(6, 6)
+        self._zoom_buttons = []
+        for text, factor in (("+", 1.6), ("−", 1 / 1.6)):
+            button = QToolButton(self)
+            button.setText(text)
+            button.setFixedSize(30, 30)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setStyleSheet(
+                "QToolButton { background: rgba(14,20,25,215); color: #e8eef4; font-size: 17px;"
+                " border: 1px solid #3a4a58; border-radius: 4px; }"
+                "QToolButton:hover { background: rgba(40,60,80,235); }")
+            button.clicked.connect(lambda _=False, f=factor: self.zoom_by(f))
+            self._zoom_buttons.append(button)
+        self.viewport().setCursor(Qt.OpenHandCursor)
 
     # -- construction ---------------------------------------------------
     def _build_static(self) -> None:
@@ -380,6 +404,8 @@ class TileMap(QGraphicsView):
             return
         self._attribution.move(self.viewport().width() - self._attribution.width() - 4,
                                self.viewport().height() - self._attribution.height() - 4)
+        for index, button in enumerate(self._zoom_buttons):
+            button.move(self.viewport().width() - 36, 6 + index * 34)
         self._schedule_base_map()
 
     def scrollContentsBy(self, dx, dy):  # noqa: N802 - Qt API
@@ -408,6 +434,57 @@ class TileMap(QGraphicsView):
         else:
             self._states[tile] = "building" if state.startswith("step:") else state
         self._refresh()
+
+    def set_inventory(self, inventory: Inventory) -> None:
+        """Mark tiles that are already installed or whose elevation data is downloaded."""
+        self._inventory = inventory
+        for item in self._inventory_items:
+            self._scene.removeItem(item)
+        self._inventory_items = []
+        cached_pen = QPen(COLOR_CACHED, 1.3)
+        cached_pen.setStyle(Qt.DotLine)
+        cached_pen.setCosmetic(True)
+        for tile in inventory.cached:
+            if tile in inventory.installed:
+                continue
+            item = self._scene.addRect(tile_rect(*tile).adjusted(4, 4, -4, -4), cached_pen)
+            item.setZValue(3.4)
+            self._inventory_items.append(item)
+        installed_pen = QPen(COLOR_INSTALLED, 2.2)
+        installed_pen.setCosmetic(True)
+        hatch = QBrush(QColor(COLOR_INSTALLED.red(), COLOR_INSTALLED.green(), COLOR_INSTALLED.blue(), 150),
+                       Qt.BDiagPattern)
+        for tile in inventory.installed:
+            item = self._scene.addRect(tile_rect(*tile).adjusted(2, 2, -2, -2), installed_pen, hatch)
+            item.setZValue(3.5)
+            self._inventory_items.append(item)
+
+    def describe_tile(self, tile: Tile) -> str:
+        info = coverage().get(tile)
+        parts = [f"Tile {tile_name(*tile)}"]
+        if tile in self._selected:
+            parts.append("selected")
+        parts.append(f"best data: {QUALITY_TEXT.get(info.quality, '') if info else '-'}")
+        packs = self._inventory.installed.get(tile)
+        if packs:
+            parts.append("✔ installed in " + ", ".join(p.describe() for p in packs))
+        else:
+            parts.append("not installed yet")
+        if tile in self._inventory.cached:
+            parts.append("downloaded: " + ", ".join(self._inventory.cached[tile]))
+        return " — ".join(parts)
+
+    def zoom_by(self, factor: float, anchor_view_point=None) -> None:
+        scale = self.transform().m11() * factor
+        if not 2 ** (1 - BASE_ZOOM) <= scale <= 2 ** (MAX_TILE_ZOOM - BASE_ZOOM + 1):
+            return
+        if anchor_view_point is None:
+            self.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
+            self.scale(factor, factor)
+            self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        else:
+            self.scale(factor, factor)
+        self._schedule_base_map()
 
     def clear_states(self) -> None:
         self._states.clear()
@@ -456,59 +533,72 @@ class TileMap(QGraphicsView):
 
     # -- interaction ----------------------------------------------------
     def wheelEvent(self, event):  # noqa: N802 - Qt API
-        factor = 1.25 if event.angleDelta().y() > 0 else 1 / 1.25
-        scale = self.transform().m11() * factor
-        if 2 ** (1 - BASE_ZOOM) <= scale <= 2 ** (MAX_TILE_ZOOM - BASE_ZOOM + 1):
-            self.scale(factor, factor)
-            self._schedule_base_map()
+        self.zoom_by(1.25 if event.angleDelta().y() > 0 else 1 / 1.25, event.position())
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802 - Qt API
+        if event.button() == Qt.LeftButton:
+            self.zoom_by(2.0, event.position())
+
+    def _tile_at(self, event) -> Tile:
+        return scene_to_tile(self.mapToScene(event.position().toPoint()))
+
+    def _set_tile(self, tile: Tile, selected: bool) -> None:
+        if tile not in self._available or (tile in self._selected) == selected:
+            return
+        (self._selected.add if selected else self._selected.discard)(tile)
+        self._refresh()
+        self.selectionChanged.emit()
 
     def _apply_paint(self, event) -> None:
-        tile = scene_to_tile(self.mapToScene(event.position().toPoint()))
-        if tile not in self._available or self._paint_mode is None:
-            return
-        changed = False
-        if self._paint_mode and tile not in self._selected:
-            self._selected.add(tile)
-            changed = True
-        elif not self._paint_mode and tile in self._selected:
-            self._selected.discard(tile)
-            changed = True
-        if changed:
-            self._refresh()
-            self.selectionChanged.emit()
+        if self._paint_mode is not None:
+            self._set_tile(self._tile_at(event), self._paint_mode)
+
+    def _pan(self, event) -> None:
+        delta = event.position() - self._pan_start
+        self._pan_start = event.position()
+        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(delta.x()))
+        self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(delta.y()))
 
     def mousePressEvent(self, event):  # noqa: N802
-        if event.button() == Qt.MiddleButton:
+        button = event.button()
+        if button == Qt.MiddleButton or (button == Qt.LeftButton and
+                                         not (self._editable and event.modifiers() & Qt.ShiftModifier)):
+            # a plain left press may become a click (toggle tile) or a drag (pan)
             self._pan_start = event.position()
+            self._press_pos = event.position() if button == Qt.LeftButton else None
+            self._press_tile = self._tile_at(event)
             return
         if not self._editable:
             return
-        if event.button() == Qt.LeftButton:
-            tile = scene_to_tile(self.mapToScene(event.position().toPoint()))
-            # clicking a selected tile toggles it off, otherwise paint on
-            self._paint_mode = tile not in self._selected
-        elif event.button() == Qt.RightButton:
+        if button == Qt.LeftButton:  # Shift+drag paints
+            self._paint_mode = self._tile_at(event) not in self._selected
+        elif button == Qt.RightButton:
             self._paint_mode = False
         self._apply_paint(event)
 
     def mouseMoveEvent(self, event):  # noqa: N802
         if self._pan_start is not None:
-            delta = event.position() - self._pan_start
-            self._pan_start = event.position()
-            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(delta.x()))
-            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(delta.y()))
+            if self._press_pos is not None:
+                if (event.position() - self._press_pos).manhattanLength() < CLICK_SLOP:
+                    return
+                self._press_pos = None  # it is a drag now
+                self.viewport().setCursor(Qt.ClosedHandCursor)
+            self._pan(event)
             return
-        tile = scene_to_tile(self.mapToScene(event.position().toPoint()))
+        tile = self._tile_at(event)
         if tile in self._available:
-            mark = "selected" if tile in self._selected else "available"
-            info = coverage().get(tile)
-            quality = QUALITY_TEXT.get(info.quality, "") if info else ""
-            self.hovered.emit(f"Tile {tile_name(*tile)} — {mark} — best data: {quality}")
+            self.hovered.emit(self.describe_tile(tile))
         else:
             self.hovered.emit("No elevation data here (sea)")
-        if self._paint_mode is not None:
-            self._apply_paint(event)
+        self._apply_paint(event)
 
     def mouseReleaseEvent(self, event):  # noqa: N802
+        if self._press_pos is not None and self._editable and event.button() == Qt.LeftButton:
+            tile = self._tile_at(event)
+            if tile == self._press_tile:
+                self._set_tile(tile, tile not in self._selected)
+                self.hovered.emit(self.describe_tile(tile) if tile in self._available else "")
         self._paint_mode = None
         self._pan_start = None
+        self._press_pos = None
+        self.viewport().setCursor(Qt.OpenHandCursor)

@@ -74,7 +74,15 @@ def _cli_build(argv: list[str]) -> int:
                            target=target, local_dem_source=args.dem_folder,
                            parallel=args.parallel, install=not args.no_install,
                            method=args.method, extra_roots=extra_roots)
-    result = Pipeline(request, Events()).run()
+    class CliEvents(Events):
+        last = -1e9
+
+        def progress(self, done: float, total: float) -> None:
+            if total > 0 and done - self.last >= 15:  # a line every 15 s
+                self.last = done
+                print(f"progress {100 * done / total:.0f}% - about {total - done:.0f} s left", flush=True)
+
+    result = Pipeline(request, CliEvents()).run()
     for tile, message in result.failed_tiles.items():
         print(f"FAILED {regions.tile_name(*tile)}: {message}")
     print(f"Built {len(result.ok_tiles)} tile(s), failed {len(result.failed_tiles)}, "

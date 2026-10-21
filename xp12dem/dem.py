@@ -111,6 +111,14 @@ class DemStore:
         return (_valid_hgt(self.path(lat, lon, arcsec, source), arcsec)
                 or (source == "sonny" and _valid_hgt(self._legacy_path(lat, lon, arcsec), arcsec)))
 
+    def is_cached(self, lat: int, lon: int, arcsec: int) -> bool:
+        """True if ``ensure`` will not need to download anything."""
+        order = self.candidates(lat, lon)
+        if not order:
+            return False
+        source = order[0]  # ensure() only falls back to later sources after a failure
+        return source == "local" or self.has(lat, lon, arcsec, source) or self.has(lat, lon, 1, source)
+
     def candidates(self, lat: int, lon: int) -> list[str]:
         from .dem_sources import FABDEM, LIDAR, NATIONAL, USGS, find_fabdem_archives, \
             find_local_files, tile_info

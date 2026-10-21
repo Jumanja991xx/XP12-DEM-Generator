@@ -63,12 +63,21 @@ very visible.
 2. **XPME / AutoOrtho users:** start XPME or AutoOrtho first, so its scenery folders can be
    read. The app warns you if a pack in `scenery_packs.ini` is empty (= not running).
 3. **Region** — pick a preset (Alps, Tyrol, Dolomites, Pyrenees, Norway, Budapest, Colorado,
-   Sierra Nevada, Cascades, Grand Canyon, Alaska, Hawaii…) or paint
+   Sierra Nevada, Cascades, Grand Canyon, Alaska, Hawaii…) or click
    your own 1°×1° tiles on the map (OpenTopoMap / OpenStreetMap with borders, places and contour lines —
    free, no API key; offline a built-in Natural Earth map with country borders is shown).
+   The map works like any web map: drag to move, mouse wheel or **+/−** to zoom, click a tile
+   to (de)select it, **Shift+drag** selects many tiles, right-drag removes them.
+   **Hatched** tiles are already installed (by any pack of this app, also next to XPME),
+   **dotted** tiles have their elevation data downloaded already. Below the map the app
+   counts how many selected tiles are installed and missing — *Select only missing tiles*
+   keeps just the ones you still need. If you build into a pack that already contains some
+   of the selected tiles, the app asks whether to build only the new tiles or replace them.
 4. **Method & resolution** — keep *Improve my current terrain*, choose 1″ (≈30 m) or 3″ (≈90 m).
 5. **Create** — the summary shows which terrain each tile currently uses; click
    *Create & Install*.
+   The remaining time is estimated in seconds per tile; the app remembers how long tiles take
+   on your PC, so from the second build on the estimate matches your hardware.
 6. If something fails (e.g. XPME was not running), fix the cause and click **Retry failed tiles** —
    only the failed tiles are built again.
 7. Start X-Plane 12 (with XPME/AutoOrtho as usual) and fly. The new terrain is stored locally;
@@ -173,6 +182,8 @@ xp12dem/
   regions.py      presets and 1°×1° tile helpers
   dem.py          Sonny DTM download, validation, 3″ resampling
   pipeline.py     orchestration: DEM → per-tile worker → pack → install
+  eta.py          remaining-time estimate (remembers build times per PC)
+  inventory.py    installed packs and downloaded DEM tiles shown on the map
   reheight.py     "improve" mode: find the active mesh, apply LiDAR heights via DSFTool
   o4x_worker.py   worker process (one per tile): re-height job or headless Ortho4XP
   installer.py    pack assembly, AutoOrtho / Custom Scenery install, scenery_packs.ini

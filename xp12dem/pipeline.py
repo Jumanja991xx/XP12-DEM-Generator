@@ -20,6 +20,7 @@ from typing import Optional
 
 from . import paths
 from .dem import Cancelled, DemStore, resolution, source_label
+from .eta import DEFAULT_BUILD, Estimator, TimingHistory, build_key
 from .installer import IMPROVE_PREFIX, InstallTarget, assemble_pack, install_pack, pack_name
 from .o4x_worker import PROGRESS_PREFIX
 from .regions import Tile, tile_name
@@ -46,16 +47,6 @@ MESH_DETAILS: tuple[MeshDetail, ...] = (
 
 WORKER_EXE = "xp12dem-worker"
 
-# Share of a tile's build time already spent when each Ortho4XP step starts.
-STEP_START = {"vector": 0.0, "mesh": 0.12, "masks": 0.45, "dsf": 0.55, "reheight": 0.0}
-# Re-height jobs report these log messages; share of the tile's time already spent.
-LOG_ANCHORS = {"converting DSF to text": 0.02, "applying LiDAR elevations": 0.30,
-               "writing new DSF": 0.75}
-# Progress weights: a DEM download is quick compared with building a tile.
-W_DOWNLOAD, W_BUILD, W_FINAL = 0.12, 1.0, 0.3
-# First guess of seconds per tile until real durations have been measured.
-EXPECTED_SECONDS = {("improve", "1"): 110, ("improve", "3"): 90,
-                    ("rebuild", "1"): 200, ("rebuild", "3"): 150}
 
 
 def mesh_detail(key: str) -> MeshDetail:
@@ -96,7 +87,7 @@ class Events:
         print(f"== {name}")
 
     def progress(self, done: float, total: float) -> None:
-        pass
+        """``done`` = seconds elapsed, ``total`` = elapsed + estimated remaining seconds."""
 
     def tile_state(self, tile: Tile, state: str) -> None:
         pass
@@ -134,12 +125,11 @@ class Pipeline:
         self.cancel_event = threading.Event()
         self._procs: set[subprocess.Popen] = set()
         self._lock = threading.Lock()
-        self._tile_fraction: dict[Tile, float] = {}  # floor from step/log events
-        self._tile_started: dict[Tile, float] = {}
         self.dem_sources: dict[Tile, str] = {}  # tile -> elevation source used
-        self._durations: list[float] = []
-        self._expected = 120.0
-        self._on_partial = lambda: None
+        self.eta: Optional[Estimator] = None
+        self._history = TimingHistory(paths.data_root() / "timings.json")
+        self._build_key = build_key(request.method, request.resolution_key, request.mesh_key)
+        self._ticking = threading.Event()
 
     # ------------------------------------------------------------------
     def cancel(self) -> None:
@@ -153,52 +143,46 @@ class Pipeline:
 
     # ------------------------------------------------------------------
     def run(self) -> BuildResult:
+        try:
+            return self._run()
+        finally:
+            self._ticking.set()
+
+    def _run(self) -> BuildResult:
         started = time.time()
         result = BuildResult()
         req = self.req
         res = resolution(req.resolution_key)
         detail = mesh_detail(req.mesh_key)
         tiles = list(req.tiles)
-        total_units = len(tiles) * (W_DOWNLOAD + W_BUILD) + W_FINAL
-        done_units = 0.0
-        self._expected = float(EXPECTED_SECONDS.get((req.method, req.resolution_key), 120))
+        store = DemStore(paths.dem_cache_dir(), req.local_dem_source)
+        cached = {t for t in tiles if store.is_cached(t[0], t[1], res.arcsec)}
+        expected = (self._history.typical(self._build_key)
+                    or float(DEFAULT_BUILD.get((req.method, req.resolution_key), 120)))
+        eta = self.eta = Estimator(tiles, cached, req.parallel, expected)
+        self._ticking.clear()
 
-        def bump(units: float = 1.0) -> None:
-            nonlocal done_units
-            done_units += units
-            self.events.progress(done_units, total_units)
+        def ticker() -> None:
+            while not self._ticking.wait(0.5):
+                self._report()
 
-        def partial() -> None:
-            # Running tiles advance with elapsed time against the expected
-            # duration (refined by finished tiles); worker events set floors.
-            now = time.monotonic()
-            with self._lock:
-                expected = (sum(self._durations) / len(self._durations)) if self._durations else self._expected
-                running = 0.0
-                for tile, begun in self._tile_started.items():
-                    by_time = min(0.97, (now - begun) / max(expected, 1.0))
-                    running += max(min(self._tile_fraction.get(tile, 0.0), 0.97), by_time)
-            self.events.progress(done_units + running * W_BUILD, total_units)
-
-        self._on_partial = partial
+        threading.Thread(target=ticker, daemon=True, name="progress").start()
 
         build_root = paths.work_dir() / "builds" / req.pack
         staged = paths.work_dir() / "staging" / req.pack
 
         # 1. Elevation data ------------------------------------------------
-        self.events.stage(f"Downloading Sonny's DTM ({res.label})")
-        store = DemStore(paths.dem_cache_dir(), req.local_dem_source)
+        self.events.stage(f"Getting elevation data ({res.label})")
         dem_files: dict[Tile, Path] = {}
         for tile in tiles:
             if self.cancel_event.is_set():
                 result.cancelled = True
                 return self._finish(result, started)
             self.events.tile_state(tile, "downloading")
-            base = done_units
+            eta.download_started(tile)
 
-            def on_bytes(done: int, total: int, base=base) -> None:
-                if total:
-                    self.events.progress(base + min(done / total, 1.0) * 0.95 * W_DOWNLOAD, total_units)
+            def on_bytes(done: int, total: int) -> None:
+                pass  # the ticker reports time based progress
 
             try:
                 dem_files[tile], source = store.ensure_with_source(tile[0], tile[1], res.arcsec,
@@ -208,7 +192,7 @@ class Pipeline:
                 while store.warnings:
                     self.events.log(f"warning - {store.warnings.pop(0)}")
                 self.events.tile_state(tile, "dem_ready")
-                bump(W_DOWNLOAD)
+                eta.download_finished(tile)
             except Cancelled:
                 result.cancelled = True
                 return self._finish(result, started)
@@ -216,7 +200,7 @@ class Pipeline:
                 result.failed_tiles[tile] = str(exc)
                 self.events.log(f"ERROR {tile_name(*tile)}: {exc}")
                 self.events.tile_state(tile, "failed")
-                bump(W_DOWNLOAD + W_BUILD)  # its build step will not run either
+                eta.download_finished(tile, ok=False)  # its build step will not run either
 
         # 2. Meshes ---------------------------------------------------------
         global_scenery = req.xplane / "Global Scenery" / "X-Plane 12 Global Scenery"
@@ -227,12 +211,9 @@ class Pipeline:
         if req.method == "improve":
             self.events.stage("Finding the terrain you currently use")
             sources, runways = self._resolve_sources(todo, result, req.pack)
-            for tile in [t for t in todo if t not in sources]:
-                bump(W_BUILD)  # failed while resolving
-            todo = [t for t in todo if t in sources]
             target = self._improve_target(sources, result)
             for tile in [t for t in todo if t not in sources]:
-                bump(W_BUILD)  # source lives in a different folder than the others
+                eta.skip(tile)  # failed while resolving, or lives in another folder
             todo = [t for t in todo if t in sources]
             self.events.stage("Applying LiDAR heights to your terrain")
         else:
@@ -240,13 +221,6 @@ class Pipeline:
             self.events.stage("Building terrain meshes with Ortho4XP")
         selected = set(tiles)
         workers = max(1, min(req.parallel, len(todo) or 1))
-        ticking = threading.Event()
-
-        def ticker() -> None:
-            while not ticking.wait(0.5):
-                partial()
-
-        threading.Thread(target=ticker, daemon=True, name="progress").start()
         with ThreadPoolExecutor(max_workers=workers) as pool:
             if req.method == "improve":
                 futures = {
@@ -272,8 +246,7 @@ class Pipeline:
                     result.failed_tiles[tile] = str(exc)
                     self.events.log(f"ERROR {tile_name(*tile)}: {exc}")
                     self.events.tile_state(tile, "failed")
-                bump(W_BUILD)
-        ticking.set()
+                eta.build_finished(tile, ok=False)  # no-op when the worker reported already
         if self.cancel_event.is_set():
             result.cancelled = True
             return self._finish(result, started)
@@ -309,13 +282,21 @@ class Pipeline:
             shutil.rmtree(build_root, ignore_errors=True)
             if req.install:
                 shutil.rmtree(staged, ignore_errors=True)
-        bump(W_FINAL)
+        eta.final_done()
+        self._report()
         return self._finish(result, started)
 
     # ------------------------------------------------------------------
     def _finish(self, result: BuildResult, started: float) -> BuildResult:
+        self._ticking.set()
+        self._history.save()
         result.seconds = time.time() - started
         return result
+
+    def _report(self) -> None:
+        if self.eta is not None:
+            elapsed = self.eta.elapsed()
+            self.events.progress(elapsed, elapsed + self.eta.remaining())
 
     def _build_tile(self, tile: Tile, dem_file: Path, build_root: Path,
                     global_scenery: Path, detail: MeshDetail) -> Path:
@@ -456,7 +437,8 @@ class Pipeline:
                                 errors="replace", env=env, creationflags=creationflags)
         with self._lock:
             self._procs.add(proc)
-            self._tile_started[tile] = time.monotonic()
+        if self.eta is not None:
+            self.eta.build_started(tile)
         error: Optional[str] = None
         try:
             with open(log_file, "w", encoding="utf-8") as log:
@@ -473,17 +455,11 @@ class Pipeline:
                     if kind == "step":
                         self.events.log(f"{name}: [{event['index'] + 1}/{event['total']}] {event['label']}")
                         self.events.tile_state(tile, f"step:{event['step']}")
-                        with self._lock:
-                            self._tile_fraction[tile] = STEP_START.get(event["step"], 0.0)
-                        self._on_partial()
                     elif kind == "step_done":
                         self.events.log(f"{name}:   done in {event['seconds']} s")
                     elif kind == "log":
                         message = event.get("message", "")
                         self.events.log(f"{name}:   {message}")
-                        if message in LOG_ANCHORS:
-                            with self._lock:
-                                self._tile_fraction[tile] = LOG_ANCHORS[message]
                     elif kind == "warning":
                         self.events.log(f"{name}: warning - {event.get('message', '')}")
                     elif kind == "error":
@@ -492,10 +468,10 @@ class Pipeline:
         finally:
             with self._lock:
                 self._procs.discard(proc)
-                self._tile_fraction.pop(tile, None)
-                begun = self._tile_started.pop(tile, None)
-                if begun is not None and code_ok(proc):
-                    self._durations.append(time.monotonic() - begun)
+            ok = code_ok(proc) and not error
+            seconds = self.eta.build_finished(tile, ok) if self.eta is not None else None
+            if ok and seconds:
+                self._history.add(self._build_key, seconds)
         if self.cancel_event.is_set():
             raise Cancelled()
         if code != 0 or error:

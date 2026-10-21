@@ -18,9 +18,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .. import APP_NAME, __version__, regions
+from .. import APP_NAME, __version__, paths, regions
 from ..dem import ATTRIBUTION, RESOLUTIONS
 from ..installer import InstallTarget, pack_name
+from ..inventory import Inventory, scan
 from ..pipeline import MESH_DETAILS, BuildRequest, BuildResult, Events, Pipeline, mesh_detail
 from ..settings import Settings
 from ..xplane import find_xplane12_installs, is_xplane12, read_autoortho_config
@@ -147,6 +148,7 @@ class MainWindow(QMainWindow):
         self.thread: Optional[BuildThread] = None
         self.result: Optional[BuildResult] = None
         self.xplane: Optional[Path] = self._detect_xplane()
+        self.inventory = Inventory()
 
         central = QWidget()
         root = QVBoxLayout(central)
@@ -167,6 +169,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self._restore_choices()
+        self._refresh_inventory()
         self._go(0)
 
     # ------------------------------------------------------------------
@@ -239,9 +242,10 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.addWidget(_title("1  Choose a region"))
-        layout.addWidget(_hint("Pick a preset or paint your own selection on the map: left-drag "
-                               "selects 1°×1° tiles, right-drag removes them, mouse wheel zooms, "
-                               "middle-drag pans. Square colours show the best free elevation data for each tile."))
+        layout.addWidget(_hint("Pick a preset or click 1°×1° tiles on the map. Drag to move the map, "
+                               "mouse wheel or +/− to zoom, Shift+drag selects many tiles, right-drag "
+                               "removes them. Colours show the best free elevation data; hatched tiles "
+                               "are already installed, dotted ones already downloaded."))
         splitter = QSplitter(Qt.Horizontal)
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -296,6 +300,19 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.map, 1)
         self.map_hover = _hint(" ")
         right_layout.addWidget(self.map_hover)
+        have_row = QHBoxLayout()
+        self.have_label = QLabel(" ")
+        self.have_label.setTextFormat(Qt.RichText)
+        self.have_label.setWordWrap(True)
+        have_row.addWidget(self.have_label, 1)
+        self.missing_btn = QPushButton("Select only missing tiles")
+        self.missing_btn.setToolTip("Remove tiles that are already installed from the selection")
+        self.missing_btn.clicked.connect(self._select_missing)
+        have_row.addWidget(self.missing_btn)
+        self.installed_btn = QPushButton("Show my installed tiles")
+        self.installed_btn.clicked.connect(self._show_installed)
+        have_row.addWidget(self.installed_btn)
+        right_layout.addLayout(have_row)
         splitter.addWidget(right)
         splitter.setSizes([300, 860])
         layout.addWidget(splitter, 1)
@@ -322,6 +339,48 @@ class MainWindow(QMainWindow):
         self._suppress_custom = False
         self.name_edit.setText(region.name)
 
+    # -- what is already installed / downloaded ---------------------------
+    def _refresh_inventory(self) -> None:
+        try:
+            self.inventory = scan(self.xplane, paths.dem_cache_dir(), self._extra_roots())
+        except Exception as exc:  # never block the app because of an odd folder
+            self._append_log(f"Could not read installed packs: {exc}")
+            self.inventory = Inventory()
+        self.map.set_inventory(self.inventory)
+        self.build_map.set_inventory(self.inventory)
+        self._update_have()
+
+    def _update_have(self) -> None:
+        if not hasattr(self, "have_label"):
+            return
+        tiles = self.map.selected()
+        inv = self.inventory
+        installed = [t for t in tiles if t in inv.installed]
+        missing = inv.missing(tiles)
+        downloaded = [t for t in missing if t in inv.cached]
+        if not tiles:
+            total = len(inv.installed)
+            self.have_label.setText(
+                f"You have <b>{total}</b> tile(s) installed in {len(inv.packs)} pack(s)." if total
+                else "Nothing installed yet.")
+        else:
+            packs = sorted({p.name for t in installed for p in inv.installed[t]})
+            text = f"Selection: <b>{len(tiles)}</b> tile(s) · "
+            text += (f"<span style='color:#50ff8c'>✔ {len(installed)} already installed</span>"
+                     f" ({', '.join(packs[:3])}{'…' if len(packs) > 3 else ''}) · " if installed else "")
+            text += f"<b>{len(missing)} missing</b>"
+            if downloaded:
+                text += f" ({len(downloaded)} of them already downloaded)"
+            self.have_label.setText(text)
+        self.missing_btn.setEnabled(bool(tiles) and bool(installed) and bool(missing))
+        self.installed_btn.setEnabled(bool(inv.installed))
+
+    def _select_missing(self) -> None:
+        self.map.set_selected(self.inventory.missing(self.map.selected()), focus=False)
+
+    def _show_installed(self) -> None:
+        self.map.focus_tiles(self.inventory.installed)
+
     def _name_is_preset(self) -> bool:
         return self.name_edit.text() in {r.name for r in regions.PRESETS}
 
@@ -335,6 +394,7 @@ class MainWindow(QMainWindow):
                     self.region_list.setCurrentRow(self.region_list.count() - 1)
                     self.region_list.blockSignals(False)
                     self.region_desc.setText("Your own tile selection.")
+        self._update_have()
         self._update_status()
 
     # ------------------------------------------------------------------
@@ -540,6 +600,7 @@ class MainWindow(QMainWindow):
                                 "'Global Scenery/X-Plane 12 Global Scenery').")
             return
         self.xplane = path
+        self._refresh_inventory()
         self._refresh_summary()
 
     def _target(self) -> Optional[InstallTarget]:
@@ -627,6 +688,12 @@ class MainWindow(QMainWindow):
         return text
 
     def _minutes(self, count: int) -> float:
+        from ..eta import TimingHistory, build_key
+
+        measured = TimingHistory(paths.data_root() / "timings.json").typical(
+            build_key(self._method_key(), self._res_key(), self._mesh_key()))
+        if measured:  # real build times on this PC
+            return measured / 60 * count / max(1, self.parallel_spin.value())
         if self._method_key() == "improve":
             per_tile = _IMPROVE_MINUTES[self._res_key()]
         else:
@@ -692,13 +759,13 @@ class MainWindow(QMainWindow):
             local_dem_source=Path(self.dem_folder_edit.text()) if self.dem_folder_edit.text().strip() else None,
             parallel=self.parallel_spin.value(), method=self._method_key(),
             extra_roots=self._extra_roots())
-        existing = target.pack_dir(request.pack)
-        if existing.exists() and not retry:
-            answer = QMessageBox.question(
-                self, APP_NAME, f"'{request.pack}' already exists. Rebuilt tiles will replace "
-                "the old ones and new tiles are added. Continue?")
-            if answer != QMessageBox.Yes:
+        if not retry:
+            self._refresh_inventory()
+            tiles = self._confirm_existing(request.pack, tiles)
+            if not tiles:
                 return
+            request.tiles = tiles
+            self._last_tiles = list(tiles)
         events = _SignalEvents()
         events.logged.connect(self._append_log)
         events.staged.connect(self._on_stage)
@@ -722,6 +789,44 @@ class MainWindow(QMainWindow):
         self._append_log(ATTRIBUTION)
         self.thread.start()
 
+    def _confirm_existing(self, pack: str, tiles: list) -> list:
+        """Explain what happens to tiles that are already in the pack. Returns
+        the tiles to build (empty = cancelled)."""
+        existing = self.inventory.pack(pack)
+        if existing is None:
+            return tiles
+        again = [t for t in tiles if t in set(existing.tiles)]
+        new = [t for t in tiles if t not in set(existing.tiles)]
+        if not again:
+            return tiles  # only adds tiles - nothing to ask
+
+        def names(items: list) -> str:
+            text = ", ".join(regions.tile_name(*t) for t in items[:8])
+            return text + (f" … (+{len(items) - 8})" if len(items) > 8 else "")
+
+        box = QMessageBox(self)
+        box.setWindowTitle(APP_NAME)
+        box.setIcon(QMessageBox.Question)
+        box.setTextFormat(Qt.RichText)
+        built = f", built {existing.built}" if existing.built else ""
+        text = (f"Your pack <b>{pack}</b> already exists ({len(existing.tiles)} tile(s){built}).<br><br>"
+                f"Of the {len(tiles)} selected tile(s):<br>"
+                f"• <b>{len(again)}</b> are already in it: {names(again)}<br>")
+        text += (f"• <b>{len(new)}</b> are new: {names(new)}<br>" if new else "")
+        text += ("<br>Tiles in the pack that you did not select stay as they are.")
+        box.setText(text)
+        only_new = box.addButton(f"Build only the {len(new)} new tile(s)", QMessageBox.AcceptRole) if new else None
+        rebuild = box.addButton(f"Build all {len(tiles)} (replace the {len(again)} existing)",
+                                QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(only_new or rebuild)
+        box.exec()
+        if only_new is not None and box.clickedButton() is only_new:
+            return new
+        if box.clickedButton() is rebuild:
+            return tiles
+        return []
+
     @staticmethod
     def _extra_roots() -> list[Path]:
         ao = read_autoortho_config()
@@ -742,21 +847,28 @@ class MainWindow(QMainWindow):
         self._append_log(f"── {text}")
 
     @Slot(float, float)
-    def _on_progress(self, done: float, total: float) -> None:
-        if not total:
+    def _on_progress(self, elapsed: float, total: float) -> None:
+        """``elapsed`` seconds so far, ``total`` = elapsed + estimated remaining seconds."""
+        if total <= 0:
             return
-        value = max(self.progress.value(), int(1000 * min(done / total, 1.0)))  # never go back
+        value = max(self.progress.value(), int(1000 * min(elapsed / total, 1.0)))  # never go back
         self.progress.setValue(value)
-        fraction = value / 1000
-        elapsed = time.monotonic() - self._build_t0
-        if fraction > 0.02 and elapsed > 5:
-            remaining = elapsed * (1 - fraction) / fraction
-            self._eta = remaining if self._eta is None else 0.8 * self._eta + 0.2 * remaining
+        remaining = max(0.0, total - elapsed)
+        now = time.monotonic()
+        if self._eta is None:
+            self._eta = remaining
+        else:
+            # count down by the time that passed, then move gently towards the new estimate
+            expected = max(0.0, self._eta - (now - self._eta_at))
+            self._eta = expected + 0.25 * (remaining - expected)
+        self._eta_at = now
+        if elapsed > 3:
             self.progress.setFormat(f"%p%  ·  ≈ {_duration(self._eta)} left")
 
     def _reset_progress(self) -> None:
         self._build_t0 = time.monotonic()
         self._eta = None
+        self._eta_at = time.monotonic()
         self.progress.setValue(0)
         self.progress.setFormat("%p%")
 
@@ -767,6 +879,7 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setEnabled(False)
         self.back_btn.setEnabled(True)
         self.thread = None
+        self._refresh_inventory()
         if result.cancelled:
             self.stage_label.setText("Cancelled.")
             self._refresh_summary()

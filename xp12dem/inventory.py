@@ -1,0 +1,156 @@
+"""What the user already has: installed DEM packs and downloaded elevation tiles.
+
+Everything is read from disk on demand (pack manifests, the DEM cache), so
+the map always shows the real state - also after packs were deleted or
+moved by hand.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable, Optional
+
+from .dem import SOURCE_LABELS
+from .installer import IMPROVE_PREFIX, MANIFEST, PACK_PREFIX
+from .regions import Tile, parse_tile
+
+_HGT = re.compile(r"^([NS])(\d{2})([EW])(\d{3})\.hgt$", re.IGNORECASE)
+
+
+@dataclass
+class InstalledPack:
+    name: str
+    path: Path
+    method: str  # "improve" or "rebuild"
+    resolution: str
+    tiles: list[Tile]
+    elevation_sources: dict[str, str] = field(default_factory=dict)
+    built: str = ""
+    enabled: bool = True
+
+    def describe(self) -> str:
+        what = "improved terrain" if self.method == "improve" else "new mesh"
+        return f"{self.name} ({what}, {self.resolution or '?'}{', ' + self.built if self.built else ''})"
+
+
+@dataclass
+class Inventory:
+    packs: list[InstalledPack] = field(default_factory=list)
+    installed: dict[Tile, list[InstalledPack]] = field(default_factory=dict)
+    cached: dict[Tile, list[str]] = field(default_factory=dict)  # tile -> ["1\" Sonny's ...", ...]
+
+    def pack(self, name: str) -> Optional[InstalledPack]:
+        for pack in self.packs:
+            if pack.name.lower() == name.lower():
+                return pack
+        return None
+
+    def missing(self, tiles: Iterable[Tile]) -> list[Tile]:
+        return sorted(t for t in tiles if t not in self.installed)
+
+
+def _is_dem_pack(name: str) -> bool:
+    low = name.lower()
+    return low.startswith(IMPROVE_PREFIX) or low.startswith(PACK_PREFIX)
+
+
+def _tiles_from_dsfs(pack: Path) -> list[Tile]:
+    tiles = []
+    for dsf in (pack / "Earth nav data").glob("*/*.dsf"):
+        try:
+            tiles.append(parse_tile(dsf.stem))
+        except ValueError:
+            continue
+    return sorted(tiles)
+
+
+def read_pack(path: Path, enabled: bool = True) -> Optional[InstalledPack]:
+    """Describe a pack made by this app (None if the folder is not one)."""
+    if not path.is_dir():
+        return None
+    manifest = {}
+    manifest_file = path / MANIFEST
+    if manifest_file.is_file():
+        try:
+            manifest = json.loads(manifest_file.read_text("utf-8"))
+        except (ValueError, OSError):
+            manifest = {}
+    # only trust tiles whose DSF is really there
+    present = set(_tiles_from_dsfs(path))
+    if not present:
+        return None
+    method = manifest.get("method") or ("improve" if path.name.lower().startswith(IMPROVE_PREFIX)
+                                        else "rebuild")
+    return InstalledPack(name=path.name, path=path, method=method,
+                         resolution=manifest.get("resolution", ""), tiles=sorted(present),
+                         elevation_sources=dict(manifest.get("elevation_sources", {})),
+                         built=manifest.get("built", ""), enabled=enabled)
+
+
+def installed_packs(xplane: Optional[Path], extra_roots: Iterable[Path] = ()) -> list[InstalledPack]:
+    """All packs made by this app: listed in scenery_packs.ini (also absolute
+    paths, e.g. next to XPME) or lying in Custom Scenery / AutoOrtho's folder."""
+    from .reheight import pack_entries, resolve_pack
+
+    found: dict[str, tuple[Path, bool]] = {}
+    listed: set[str] = set()  # pack names enabled in scenery_packs.ini
+    roots = list(extra_roots)
+    if xplane is not None:
+        custom = xplane / "Custom Scenery"
+        for name, raw in pack_entries(custom):
+            if _is_dem_pack(name):
+                listed.add(name.lower())
+                path = resolve_pack(xplane, raw)
+                found[str(path).lower()] = (path, True)
+        roots.insert(0, custom)
+    for root in roots:
+        try:
+            children = list(Path(root).iterdir())
+        except OSError:
+            continue
+        for child in children:
+            key = str(child).lower()
+            if _is_dem_pack(child.name) and key not in found:
+                # e.g. AutoOrtho's folder, or a pack missing from scenery_packs.ini
+                found[key] = (child, xplane is None or child.name.lower() in listed)
+    packs = []
+    names: set[str] = set()
+    for path, is_enabled in found.values():
+        pack = read_pack(path, is_enabled)
+        if pack is not None and pack.name.lower() not in names:
+            names.add(pack.name.lower())
+            packs.append(pack)
+    return sorted(packs, key=lambda p: p.name.lower())
+
+
+def cached_dems(cache_dir: Path) -> dict[Tile, list[str]]:
+    """Elevation tiles already downloaded, with resolution and source."""
+    result: dict[Tile, list[str]] = {}
+    for res_dir in ("1s", "3s"):
+        base = Path(cache_dir) / res_dir
+        if not base.is_dir():
+            continue
+        folders = [(p, p.name) for p in base.iterdir() if p.is_dir()] + [(base, "sonny")]
+        for folder, source in folders:
+            for hgt in folder.glob("*.hgt"):
+                match = _HGT.match(hgt.name)
+                if not match or hgt.stat().st_size < 1000:
+                    continue
+                lat = int(match.group(2)) * (1 if match.group(1).upper() == "N" else -1)
+                lon = int(match.group(4)) * (1 if match.group(3).upper() == "E" else -1)
+                label = f"{res_dir[0]}\" {SOURCE_LABELS.get(source, source)}"
+                entries = result.setdefault((lat, lon), [])
+                if label not in entries:
+                    entries.append(label)
+    return result
+
+
+def scan(xplane: Optional[Path], cache_dir: Path, extra_roots: Iterable[Path] = ()) -> Inventory:
+    inv = Inventory(packs=installed_packs(xplane, extra_roots), cached=cached_dems(cache_dir))
+    for pack in inv.packs:
+        for tile in pack.tiles:
+            inv.installed.setdefault(tile, []).append(pack)
+    return inv
