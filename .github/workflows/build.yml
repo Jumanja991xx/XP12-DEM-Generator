@@ -44,7 +44,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$xp\Custom Scenery", "$xp\Global Scenery\X-Plane 12 Global Scenery" | Out-Null
           $env:XP12DEM_DATA = Join-Path $env:RUNNER_TEMP "xp12dem data"
           $p = Start-Process -FilePath "dist\XP12DEMGenerator\XP12DEMGenerator.exe" -Wait -PassThru -ArgumentList @(
-            "build", "--tiles", "+47+011", "--name", "CI Smoke", "--resolution", "3",
+            "build", "--tiles", "+47+011", "--name", "`"CI Smoke`"", "--resolution", "3",
             "--mesh", "balanced", "--xplane", "`"$xp`"", "--target", "custom_scenery")
           $dsf = "$xp\Custom Scenery\z_ao_dem_ci_smoke\Earth nav data\+40+010\+47+011.dsf"
           $ok = ($p.ExitCode -eq 0) -and (Test-Path $dsf)
