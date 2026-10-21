@@ -36,6 +36,13 @@ QRadioButton::indicator:checked { border: 2px solid #f0a030;
               background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
               stop:0 #f0a030, stop:0.55 #f0a030, stop:0.65 #0e1419); }
 QRadioButton::indicator:disabled { border-color: #34465a; }
+QCheckBox { spacing: 8px; }
+QCheckBox:disabled { color: #4f5d6b; }
+QCheckBox::indicator { width: 14px; height: 14px; border-radius: 3px;
+              border: 2px solid #8a99a8; background: #0e1419; }
+QCheckBox::indicator:checked { border: 2px solid #f0a030; background: #f0a030; }
+QCheckBox::indicator:disabled { border-color: #34465a; }
+QPushButton:checked { background: #3a4d60; border-color: #f0a030; }
 QPushButton { background: #24303d; border: 1px solid #34465a; border-radius: 6px;
               padding: 7px 16px; }
 QPushButton:hover { border-color: #f0a030; }

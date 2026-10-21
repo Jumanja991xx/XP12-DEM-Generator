@@ -12,7 +12,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QButtonGroup, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QButtonGroup, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QRadioButton, QSpinBox, QSplitter, QStackedWidget,
     QVBoxLayout, QWidget,
@@ -202,6 +202,10 @@ class MainWindow(QMainWindow):
         footer.setObjectName("footer")
         layout = QHBoxLayout(footer)
         layout.setContentsMargins(24, 10, 24, 14)
+        self.delete_btn = QPushButton("Delete data…")
+        self.delete_btn.setToolTip("Delete downloaded data, caches and - if you want - installed packs")
+        self.delete_btn.clicked.connect(self._delete_data)
+        layout.addWidget(self.delete_btn)
         self.status_label = _hint("")
         layout.addWidget(self.status_label, 1)
         self.back_btn = QPushButton("Back")
@@ -244,8 +248,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(_title("1  Choose a region"))
         layout.addWidget(_hint("Pick a preset or click 1°×1° tiles on the map. Drag to move the map, "
                                "mouse wheel or +/− to zoom, Shift+drag selects many tiles, right-drag "
-                               "removes them. Colours show the best free elevation data; hatched tiles "
-                               "are already installed, dotted ones already downloaded."))
+                               "removes them. Green = LiDAR (best), blue = national model, grey = satellite "
+                               "only. <b style='color:#ff8c00'>Orange</b> tiles are already installed, "
+                               "dotted ones already downloaded."))
         splitter = QSplitter(Qt.Horizontal)
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -289,6 +294,12 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda _=False, v=view: self.map.show_view(v))
             buttons.addWidget(btn)
         left_layout.addLayout(buttons)
+        self.quality_btn = QPushButton("Highlight data quality")
+        self.quality_btn.setCheckable(True)
+        self.quality_btn.setToolTip("Strong colours: green = LiDAR, blue = national model, "
+                                    "grey = satellite only")
+        self.quality_btn.toggled.connect(lambda on: self.map.set_quality_view(on))
+        left_layout.addWidget(self.quality_btn)
         splitter.addWidget(left)
 
         self.map = TileMap()
@@ -380,6 +391,70 @@ class MainWindow(QMainWindow):
 
     def _show_installed(self) -> None:
         self.map.focus_tiles(self.inventory.installed)
+
+    def _delete_data(self) -> None:
+        """Delete app data and optionally installed packs - asks twice."""
+        from ..cleanup import delete_items, delete_packs, folder_size, human_size, local_items
+
+        if self.thread is not None and self.thread.isRunning():
+            QMessageBox.information(self, APP_NAME, "Please wait until the build has finished.")
+            return
+        self._refresh_inventory()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Delete data")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("<b>What should be deleted?</b>"))
+        boxes = []
+        for item in local_items():
+            size = item.size
+            box = QCheckBox(f"{item.label}  ({human_size(size)})")
+            box.setChecked(item.default and size > 0)
+            box.setEnabled(size > 0)
+            boxes.append((box, item, size))
+            layout.addWidget(box)
+        packs = self.inventory.packs
+        pack_sizes = sum(folder_size(p.path) for p in packs)
+        packs_box = QCheckBox(f"Installed terrain packs of this app ({len(packs)} pack(s), "
+                              f"{human_size(pack_sizes)}) - removed from X-Plane")
+        packs_box.setEnabled(bool(packs))
+        layout.addWidget(packs_box)
+        if packs:
+            layout.addWidget(_hint("  " + ", ".join(p.name for p in packs)))
+        layout.addWidget(_hint("X-Plane, XPME, AutoOrtho and all other scenery are never touched."))
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        go = buttons.addButton("Delete…", QDialogButtonBox.DestructiveRole)
+        go.clicked.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        chosen = [(item, size) for box, item, size in boxes if box.isChecked()]
+        remove_packs = packs_box.isChecked()
+        if not chosen and not remove_packs:
+            return
+        total = sum(size for _, size in chosen) + (pack_sizes if remove_packs else 0)
+        lines = [f"• {item.label}" for item, _ in chosen]
+        if remove_packs:
+            lines.append(f"• {len(packs)} installed pack(s): " + ", ".join(p.name for p in packs))
+        confirm = QMessageBox(self)
+        confirm.setIcon(QMessageBox.Warning)
+        confirm.setWindowTitle(APP_NAME)
+        confirm.setText(f"Really delete {human_size(total)}? This cannot be undone.\n\n" + "\n".join(lines))
+        yes = confirm.addButton("Yes, delete permanently", QMessageBox.DestructiveRole)
+        confirm.addButton(QMessageBox.Cancel)
+        confirm.setDefaultButton(QMessageBox.Cancel)
+        confirm.exec()
+        if confirm.clickedButton() is not yes:
+            return
+        errors = delete_items(item for item, _ in chosen)
+        if remove_packs:
+            errors += delete_packs(packs, self.xplane)
+        self._refresh_inventory()
+        if errors:
+            QMessageBox.warning(self, APP_NAME, "Some files could not be deleted (in use?):\n\n"
+                                + "\n".join(errors[:10]))
+        else:
+            QMessageBox.information(self, APP_NAME, f"Deleted {human_size(total)}.")
 
     def _name_is_preset(self) -> bool:
         return self.name_edit.text() in {r.name for r in regions.PRESETS}

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import requests
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QGraphicsItem, QGraphicsPixmapItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
@@ -56,22 +56,24 @@ COLOR_COAST = QColor("#5d7f69")
 COLOR_BORDER = QColor(230, 235, 240, 150)
 COLOR_COUNTRY = QColor(200, 210, 220, 150)
 COLOR_AVAILABLE = QColor(40, 130, 255, 22)
-# Tile colours by best available elevation source.
+# Tile colours by best available elevation source: green = excellent,
+# blue = good, grey = satellite data only.
 COLOR_QUALITY = {
-    LIDAR: QColor(40, 190, 90, 70),
-    NATIONAL: QColor(30, 170, 190, 60),
-    USGS: QColor(40, 190, 90, 70),
-    FABDEM: QColor(240, 200, 40, 55),
+    LIDAR: QColor(30, 200, 80, 115),
+    USGS: QColor(30, 200, 80, 115),
+    NATIONAL: QColor(40, 120, 255, 105),
+    FABDEM: QColor(120, 120, 125, 120),
 }
+RATING = {LIDAR: "BEST", USGS: "BEST", NATIONAL: "GOOD", FABDEM: "BASIC"}
+COLOR_INSTALLED = QColor(255, 140, 0)
+COLOR_CACHED = QColor(235, 245, 255, 230)
 LEGEND = (
-    (QColor(40, 190, 90), "■", "LiDAR (Sonny / USGS 3DEP)"),
-    (QColor(30, 170, 190), "■", "National 10-50 m model"),
-    (QColor(240, 200, 40), "■", "FABDEM (satellite, 30 m)"),
-    (QColor(80, 255, 140), "▨", "Already installed"),
-    (QColor(140, 200, 255), "⬚", "Elevation data downloaded"),
+    (QColor(30, 200, 80), "■", "<b>Best</b> - LiDAR 1-5 m (Sonny / USGS 3DEP)"),
+    (QColor(40, 120, 255), "■", "<b>Good</b> - national model 10-50 m"),
+    (QColor(150, 150, 155), "■", "<b>Basic</b> - satellite 30 m (FABDEM)"),
+    (COLOR_INSTALLED, "■", "<b>Already installed</b>"),
+    (COLOR_CACHED, "⬚", "Elevation data downloaded"),
 )
-COLOR_INSTALLED = QColor(80, 255, 140)
-COLOR_CACHED = QColor(140, 200, 255, 220)
 # pixels the mouse may move before a left click becomes a drag (pan)
 CLICK_SLOP = 5
 VIEWS = {
@@ -83,6 +85,7 @@ VIEWS = {
 COLOR_GRID = QColor(70, 110, 160, 130)
 COLOR_SELECTED = QColor(225, 40, 200, 130)
 COLOR_SELECTED_EDGE = QColor(255, 255, 255)
+COLOR_SELECTED_FRAME = QColor(235, 40, 210)
 COLOR_CITY = QColor(235, 240, 245, 210)
 COLOR_STATE = {
     "downloading": QColor(80, 160, 255, 150),
@@ -231,7 +234,7 @@ class TileMap(QGraphicsView):
         self.setRenderHint(QPainter.Antialiasing)
         self.setRenderHint(QPainter.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.NoDrag)
-        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setTransformationAnchor(QGraphicsView.NoAnchor)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setMouseTracking(True)
@@ -345,12 +348,16 @@ class TileMap(QGraphicsView):
         grid_pen = QPen(COLOR_GRID, 1)
         grid_pen.setCosmetic(True)
         info = coverage()
-        brushes = {q: QBrush(c) for q, c in COLOR_QUALITY.items()}
-        fallback = QBrush(COLOR_AVAILABLE)
+        areas: dict[Optional[str], QPainterPath] = {}
         for lat, lon in self._available:
             quality = info[(lat, lon)].quality if (lat, lon) in info else None
-            item = self._scene.addRect(tile_rect(lat, lon), grid_pen, brushes.get(quality, fallback))
+            areas.setdefault(quality, QPainterPath()).addRect(tile_rect(lat, lon))
+        # one item per quality class: cheap to draw and to restyle
+        self._quality_items = {}
+        for quality, path in areas.items():
+            item = self._scene.addPath(path, grid_pen, QBrush(COLOR_QUALITY.get(quality, COLOR_AVAILABLE)))
             item.setZValue(2)
+            self._quality_items[quality] = item
         self._scene.setSceneRect(QRectF(to_scene(-180, 84), to_scene(180, -60)))
 
     # -- online base map ------------------------------------------------
@@ -450,21 +457,32 @@ class TileMap(QGraphicsView):
             item = self._scene.addRect(tile_rect(*tile).adjusted(4, 4, -4, -4), cached_pen)
             item.setZValue(3.4)
             self._inventory_items.append(item)
-        installed_pen = QPen(COLOR_INSTALLED, 2.2)
+        installed_pen = QPen(COLOR_INSTALLED, 2.5)
         installed_pen.setCosmetic(True)
-        hatch = QBrush(QColor(COLOR_INSTALLED.red(), COLOR_INSTALLED.green(), COLOR_INSTALLED.blue(), 150),
-                       Qt.BDiagPattern)
+        fill = QColor(COLOR_INSTALLED)
+        fill.setAlpha(165)
         for tile in inventory.installed:
-            item = self._scene.addRect(tile_rect(*tile).adjusted(2, 2, -2, -2), installed_pen, hatch)
-            item.setZValue(3.5)
+            item = self._scene.addRect(tile_rect(*tile).adjusted(1.5, 1.5, -1.5, -1.5), installed_pen,
+                                       QBrush(fill))
+            item.setZValue(3.2)  # below the selection outline
             self._inventory_items.append(item)
+        self._refresh()
+
+    def set_quality_view(self, strong: bool) -> None:
+        """Strong colours make the data quality stand out over the base map."""
+        for quality, item in self._quality_items.items():
+            color = QColor(COLOR_QUALITY.get(quality, COLOR_AVAILABLE))
+            if strong:
+                color.setAlpha(215)
+            item.setBrush(QBrush(color))
 
     def describe_tile(self, tile: Tile) -> str:
         info = coverage().get(tile)
         parts = [f"Tile {tile_name(*tile)}"]
         if tile in self._selected:
             parts.append("selected")
-        parts.append(f"best data: {QUALITY_TEXT.get(info.quality, '') if info else '-'}")
+        parts.append(f"{RATING.get(info.quality, '')} {QUALITY_TEXT.get(info.quality, '')}" if info
+                     else "no data")
         packs = self._inventory.installed.get(tile)
         if packs:
             parts.append("✔ installed in " + ", ".join(p.describe() for p in packs))
@@ -474,16 +492,21 @@ class TileMap(QGraphicsView):
             parts.append("downloaded: " + ", ".join(self._inventory.cached[tile]))
         return " — ".join(parts)
 
-    def zoom_by(self, factor: float, anchor_view_point=None) -> None:
+    def zoom_by(self, factor: float, anchor: Optional[QPoint] = None) -> None:
+        """Zoom keeping the map point under ``anchor`` (viewport pixels, default:
+        centre) in place. Done by hand because Qt's AnchorUnderMouse relies on
+        mouse-move bookkeeping that our own mouse handlers bypass."""
         scale = self.transform().m11() * factor
         if not 2 ** (1 - BASE_ZOOM) <= scale <= 2 ** (MAX_TILE_ZOOM - BASE_ZOOM + 1):
             return
-        if anchor_view_point is None:
-            self.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
-            self.scale(factor, factor)
-            self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
-        else:
-            self.scale(factor, factor)
+        viewport = self.viewport().rect()
+        anchor = anchor if anchor is not None else viewport.center()
+        before = self.mapToScene(anchor)
+        self.setTransformationAnchor(QGraphicsView.NoAnchor)
+        self.scale(factor, factor)
+        after = self.mapToScene(anchor)
+        centre = self.mapToScene(viewport.center())
+        self.centerOn(centre + (before - after))
         self._schedule_base_map()
 
     def clear_states(self) -> None:
@@ -520,20 +543,30 @@ class TileMap(QGraphicsView):
                 self._scene.removeItem(self._tile_items.pop(tile))
         edge = QPen(COLOR_SELECTED_EDGE, 1.5)
         edge.setCosmetic(True)
+        # selected tiles that are already installed keep their orange fill and
+        # get a thick selection frame instead
+        frame = QPen(COLOR_SELECTED_FRAME, 4)
+        frame.setCosmetic(True)
         for tile in wanted:
             state = self._states.get(tile)
-            fill = COLOR_STATE.get(state, COLOR_SELECTED) if state else COLOR_SELECTED
+            if state:
+                pen, brush = edge, QBrush(COLOR_STATE.get(state, COLOR_SELECTED))
+            elif tile in self._inventory.installed:
+                pen, brush = frame, QBrush(Qt.NoBrush)
+            else:
+                pen, brush = edge, QBrush(COLOR_SELECTED)
             item = self._tile_items.get(tile)
             if item is None:
-                item = self._scene.addRect(tile_rect(*tile), edge, QBrush(fill))
-                item.setZValue(3)
+                item = self._scene.addRect(tile_rect(*tile).adjusted(1, 1, -1, -1), pen, brush)
+                item.setZValue(3.3)
                 self._tile_items[tile] = item
             else:
-                item.setBrush(QBrush(fill))
+                item.setPen(pen)
+                item.setBrush(brush)
 
     # -- interaction ----------------------------------------------------
     def wheelEvent(self, event):  # noqa: N802 - Qt API
-        self.zoom_by(1.25 if event.angleDelta().y() > 0 else 1 / 1.25, event.position())
+        self.zoom_by(1.25 if event.angleDelta().y() > 0 else 1 / 1.25, event.position().toPoint())
 
     def mouseDoubleClickEvent(self, event):  # noqa: N802 - Qt API
         if event.button() == Qt.LeftButton:
