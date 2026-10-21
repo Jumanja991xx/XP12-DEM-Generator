@@ -38,11 +38,16 @@ jobs:
       - name: Build executables
         run: pyinstaller --noconfirm packaging/xp12dem.spec
       - name: Smoke test - build one real tile with the packaged app
+        timeout-minutes: 20
         shell: pwsh
         run: |
           $xp = Join-Path $env:RUNNER_TEMP "X-Plane 12"
           New-Item -ItemType Directory -Force -Path "$xp\Custom Scenery", "$xp\Global Scenery\X-Plane 12 Global Scenery" | Out-Null
           $env:XP12DEM_DATA = Join-Path $env:RUNNER_TEMP "xp12dem data"
+          # Public Overpass servers throttle GitHub's shared runner IPs, so the
+          # smoke test uses a pre-seeded (empty) OSM cache for the tile. Everything
+          # else - DEM download, worker exe, Triangle4XP, DSF writing, install - is real.
+          python packaging/ci_seed_osm.py "$env:XP12DEM_DATA" 47 11
           $p = Start-Process -FilePath "dist\XP12DEMGenerator\XP12DEMGenerator.exe" -Wait -PassThru -ArgumentList @(
             "build", "--tiles", "+47+011", "--name", "`"CI Smoke`"", "--resolution", "3",
             "--mesh", "balanced", "--xplane", "`"$xp`"", "--target", "custom_scenery")
@@ -59,6 +64,12 @@ jobs:
           if (Test-Path "$xp\Custom Scenery\scenery_packs.ini") { $diag += Get-Content "$xp\Custom Scenery\scenery_packs.ini" }
           $text = (($diag | ForEach-Object { "$_" -replace '%', '%25' -replace "`r", '' }) -join "%0A") -replace "::", ": :"
           if ($ok) { Write-Output "::notice title=Smoke test::$text" } else { Write-Output "::error title=Smoke test::$text"; exit 1 }
+      - name: Overpass reachability (informational)
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          python packaging/ci_check_overpass.py
       - name: Package
         shell: pwsh
         run: |

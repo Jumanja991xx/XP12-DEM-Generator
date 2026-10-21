@@ -34,7 +34,7 @@ class _Session:
 
 def test_build_query_matches_ortho4xp_format():
     q = overpass.build_query(('way["natural"="water"]', 'rel["natural"="water"]'), (47, 11, 48, 12))
-    assert q == ('[timeout:180];(way["natural"="water"](47, 11, 48, 12);'
+    assert q == ('[timeout:120];(way["natural"="water"](47, 11, 48, 12);'
                  'rel["natural"="water"](47, 11, 48, 12););(._;>>;);out meta;')
 
 
@@ -76,3 +76,17 @@ def test_fails_fast_after_a_total_failure():
                           sleep=lambda s: None) == 0
     assert session.calls == []
     overpass.failed_queries.clear()
+
+
+def test_overall_deadline():
+    now = [0.0]
+
+    def clock():
+        now[0] += 200  # every request "takes" 200 s
+        return now[0]
+
+    session = _Session([_Resp(504, b"")] * 50)
+    assert overpass.fetch("x", (0, 0, 1, 1), log=lambda s: None, session=session,
+                          sleep=lambda s: None, clock=clock) == 0
+    assert len(session.calls) < len(overpass.SERVERS) * overpass.MAX_ROUNDS
+    assert overpass.failed_queries

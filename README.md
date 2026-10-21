@@ -136,7 +136,8 @@ mesh → masks → DSF.
 * **Old terrain still visible** — check that `z_ao_dem_…` is listed above `z_ao_eur` in
   `Custom Scenery\scenery_packs.ini`.
 * **OSM download is slow / fails** — the public Overpass servers are sometimes busy; the
-  app retries automatically. Just run the build again — finished downloads are cached.
+  app rotates through six servers and gives up after 10 minutes per query with a clear
+  message. Just run the build again later — finished downloads are cached.
 * Detailed per-tile logs: `%LOCALAPPDATA%\XP12DEMGenerator\logs`.
 
 ## Credits and licenses

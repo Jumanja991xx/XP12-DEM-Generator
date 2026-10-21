@@ -30,7 +30,9 @@ SERVERS: tuple[tuple[str, str], ...] = (
 )
 
 MAX_ROUNDS = 4  # each round tries every server once
-TIMEOUT = 180
+TIMEOUT = 120  # server side query timeout (seconds)
+REQUEST_TIMEOUT = 150  # client side, per HTTP request
+MAX_SECONDS = 600  # give up on a query after this long, whatever the rounds
 
 last_error: Optional[str] = None
 failed_queries: list[str] = []  # one entry per query that failed on every server
@@ -53,7 +55,8 @@ def _looks_complete(content: bytes) -> bool:
 def fetch(query, bbox, log: Callable[[str], None] = print,
           session: Optional[requests.Session] = None,
           sleep: Callable[[float], None] = time.sleep,
-          is_cancelled: Callable[[], bool] = lambda: False) -> bytes | int:
+          is_cancelled: Callable[[], bool] = lambda: False,
+          clock: Callable[[], float] = time.monotonic) -> bytes | int:
     """Return the OSM XML answer, or ``0`` when every server failed."""
     global last_error
     if failed_queries:
@@ -63,13 +66,18 @@ def fetch(query, bbox, log: Callable[[str], None] = print,
     session = session or requests.Session()
     session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/xml, text/xml"})
     data = build_query(query, bbox)
+    deadline = clock() + MAX_SECONDS
     for round_index in range(MAX_ROUNDS):
         for name, url in SERVERS:
             if is_cancelled():
                 failed_queries.append("cancelled")
                 return 0
+            if clock() > deadline:
+                log(f"        Giving up after {MAX_SECONDS // 60} minutes without a valid answer")
+                failed_queries.append(last_error or "timeout")
+                return 0
             try:
-                response = session.post(url, data={"data": data}, timeout=TIMEOUT + 30)
+                response = session.post(url, data={"data": data}, timeout=REQUEST_TIMEOUT)
             except requests.RequestException as exc:
                 last_error = f"{name}: {type(exc).__name__}"
                 log(f"        OSM server {name} unreachable ({type(exc).__name__}), trying next server")
