@@ -20,7 +20,7 @@ from typing import Optional
 
 from . import paths
 from .dem import Cancelled, DemStore, resolution
-from .installer import InstallTarget, assemble_pack, install_pack, pack_name
+from .installer import IMPROVE_PREFIX, InstallTarget, assemble_pack, install_pack, pack_name
 from .o4x_worker import PROGRESS_PREFIX
 from .regions import Tile, tile_name
 
@@ -47,7 +47,7 @@ MESH_DETAILS: tuple[MeshDetail, ...] = (
 WORKER_EXE = "xp12dem-worker"
 
 # Share of a tile's build time already spent when each Ortho4XP step starts.
-STEP_START = {"vector": 0.0, "mesh": 0.12, "masks": 0.45, "dsf": 0.55}
+STEP_START = {"vector": 0.0, "mesh": 0.12, "masks": 0.45, "dsf": 0.55, "reheight": 0.1}
 
 
 def mesh_detail(key: str) -> MeshDetail:
@@ -70,10 +70,12 @@ class BuildRequest:
     parallel: int = 1
     install: bool = True
     keep_work_files: bool = False
+    method: str = "improve"  # "improve" existing terrain, or "rebuild" with Ortho4XP
+    extra_roots: list[Path] = field(default_factory=list)  # e.g. AutoOrtho's real scenery dir
 
     @property
     def pack(self) -> str:
-        return pack_name(self.slug)
+        return pack_name(self.slug, self.method)
 
 
 class Events:
@@ -190,17 +192,35 @@ class Pipeline:
                 bump(2)  # its build step will not run either
 
         # 2. Meshes ---------------------------------------------------------
-        self.events.stage("Building terrain meshes with Ortho4XP")
         global_scenery = req.xplane / "Global Scenery" / "X-Plane 12 Global Scenery"
         tile_dirs: dict[Tile, Path] = {}
         todo = [t for t in tiles if t in dem_files]
+        sources: dict[Tile, "reheight.MeshSource"] = {}
+        runways: dict[Tile, list] = {}
+        if req.method == "improve":
+            self.events.stage("Finding the terrain you currently use")
+            sources, runways = self._resolve_sources(todo, result, req.pack)
+            for tile in [t for t in todo if t not in sources]:
+                bump()  # failed while resolving
+            todo = [t for t in todo if t in sources]
+            self.events.stage("Applying LiDAR heights to your terrain")
+        else:
+            self.events.stage("Building terrain meshes with Ortho4XP")
+        selected = set(tiles)
         workers = max(1, min(req.parallel, len(todo) or 1))
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(self._build_tile, tile, dem_files[tile], build_root,
-                            global_scenery, detail): tile
-                for tile in todo
-            }
+            if req.method == "improve":
+                futures = {
+                    pool.submit(self._improve_tile, tile, dem_files[tile], build_root,
+                                sources[tile], runways.get(tile, []), selected): tile
+                    for tile in todo
+                }
+            else:
+                futures = {
+                    pool.submit(self._build_tile, tile, dem_files[tile], build_root,
+                                global_scenery, detail): tile
+                    for tile in todo
+                }
             for future in as_completed(futures):
                 tile = futures[future]
                 try:
@@ -225,11 +245,21 @@ class Pipeline:
         self.events.stage("Assembling scenery pack")
         if staged.exists():
             shutil.rmtree(staged)
+        improve = req.method == "improve"
         assemble_pack(tile_dirs, staged, region_name=req.region_name,
-                      resolution_label=res.label, mesh_label=detail.label)
+                      resolution_label=res.label,
+                      mesh_label="unchanged (existing mesh)" if improve else detail.label,
+                      sources={t: sources[t].label for t in tile_dirs} if improve else None)
         if req.install:
             self.events.stage("Installing into X-Plane 12")
-            result.installed_to = install_pack(staged, req.target, req.pack)
+            above = {src.name for t, src in sources.items() if t in tile_dirs and src.kind == "pack"}
+            if improve:
+                # a fresh build must also win over older LiDAR packs for the same tiles
+                from .reheight import enabled_packs
+
+                above |= {p for p in enabled_packs(req.xplane / "Custom Scenery")
+                          if p.lower().startswith(IMPROVE_PREFIX) and p != req.pack}
+            result.installed_to = install_pack(staged, req.target, req.pack, above)
             self.events.log(f"Installed {req.pack} -> {result.installed_to}")
             self.events.log("scenery_packs.ini updated (backup: scenery_packs.ini.xp12dem.bak)")
         else:
@@ -274,6 +304,70 @@ class Pipeline:
         if not job["global_scenery"]:
             self.events.log(f"{name}: X-Plane 12 Global Scenery not found - "
                             "DSF will be built without XP12 bathymetry rasters.")
+        self.events.log(f"{name}: starting Ortho4XP")
+        return self._run_worker(tile, job, build_dir)
+
+    def _resolve_sources(self, tiles: list[Tile], result: BuildResult, own_pack: str):
+        """Which base mesh is active for each tile, plus nearby runways."""
+        from . import reheight as RH
+
+        _, seven = RH.platform_tools(paths.ortho4xp_root())
+        tmp = paths.work_dir() / "probe"
+        tmp.mkdir(parents=True, exist_ok=True)
+        sources = {}
+        for tile in tiles:
+            try:
+                src = RH.find_mesh_source(tile, self.req.xplane, skip=[own_pack],
+                                          extra_roots=self.req.extra_roots,
+                                          seven_zip=seven, tmp_dir=tmp)
+                if not src.dsf.is_file():
+                    raise FileNotFoundError(f"no terrain found for this tile ({src.dsf} missing)")
+                sources[tile] = src
+                self.events.log(f"{tile_name(*tile)}: current terrain = {src.label}")
+                if src.unreadable_above:
+                    self.events.log(
+                        f"{tile_name(*tile)}: warning - {', '.join(src.unreadable_above)} could not be "
+                        "read (empty folder). If XPME/AutoOrtho is not running, start it and build "
+                        "again, otherwise the new heights are hidden by that pack.")
+            except Exception as exc:
+                result.failed_tiles[tile] = str(exc)
+                self.events.log(f"ERROR {tile_name(*tile)}: {exc}")
+                self.events.tile_state(tile, "failed")
+        shutil.rmtree(tmp, ignore_errors=True)
+        packs = RH.enabled_packs(self.req.xplane / "Custom Scenery")
+        runways = RH.load_runways(RH.apt_files_for(self.req.xplane, packs), list(sources))
+        count = sum(len(v) for v in runways.values())
+        self.events.log(f"{count} runway(s) found - their surroundings keep the original heights")
+        return sources, runways
+
+    def _improve_tile(self, tile: Tile, dem_file: Path, build_root: Path, source,
+                      runways: list, selected: set[Tile]) -> Path:
+        if self.cancel_event.is_set():
+            raise Cancelled()
+        lat, lon = tile
+        name = tile_name(lat, lon)
+        build_dir = build_root / name
+        if build_dir.exists():
+            shutil.rmtree(build_dir)
+        neighbours = {"n": (lat + 1, lon), "s": (lat - 1, lon), "e": (lat, lon + 1), "w": (lat, lon - 1)}
+        job = {
+            "mode": "reheight",
+            "ortho4xp_root": str(paths.ortho4xp_root()),
+            "work_dir": str(paths.work_dir() / "reheight" / name),
+            "lat": lat,
+            "lon": lon,
+            "dem_file": str(dem_file),
+            "build_dir": str(build_dir),
+            "source": {"kind": source.kind, "name": source.name, "dsf": str(source.dsf),
+                       "read_root": str(source.read_root)},
+            "runways": [[r.lat1, r.lon1, r.lat2, r.lon2, r.half_width] for r in runways],
+            "feather": {side: nb not in selected for side, nb in neighbours.items()},
+        }
+        self.events.log(f"{name}: improving {source.label}")
+        return self._run_worker(tile, job, build_dir)
+
+    def _run_worker(self, tile: Tile, job: dict, build_dir: Path) -> Path:
+        name = tile_name(*tile)
         jobs_dir = paths.work_dir() / "jobs"
         jobs_dir.mkdir(parents=True, exist_ok=True)
         job_file = jobs_dir / f"{name}.json"
@@ -282,7 +376,6 @@ class Pipeline:
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
         self.events.tile_state(tile, "building")
-        self.events.log(f"{name}: starting Ortho4XP (log: {log_file})")
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
         proc = subprocess.Popen(worker_command(job_file), stdout=subprocess.PIPE,
@@ -311,6 +404,8 @@ class Pipeline:
                         self._on_partial()
                     elif kind == "step_done":
                         self.events.log(f"{name}:   done in {event['seconds']} s")
+                    elif kind == "log":
+                        self.events.log(f"{name}:   {event.get('message', '')}")
                     elif kind == "warning":
                         self.events.log(f"{name}: warning - {event.get('message', '')}")
                     elif kind == "error":
@@ -323,6 +418,6 @@ class Pipeline:
         if self.cancel_event.is_set():
             raise Cancelled()
         if code != 0 or error:
-            raise RuntimeError(error or f"Ortho4XP exited with code {code} (see {log_file})")
+            raise RuntimeError(error or f"worker exited with code {code} (see {log_file})")
         self.events.log(f"{name}: finished")
         return build_dir

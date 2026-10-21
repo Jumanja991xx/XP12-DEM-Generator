@@ -193,7 +193,32 @@ def prepare_global_dsf(global_scenery: str, lat: int, lon: int, o4x_root: Path,
     return str(cache_root)
 
 
+def run_reheight(job: dict) -> int:
+    """Replace the elevations of an existing base mesh (see :mod:`xp12dem.reheight`)."""
+    from xp12dem import reheight as RH
+
+    lat, lon = int(job["lat"]), int(job["lon"])
+    src = job["source"]
+    source = RH.MeshSource(src["kind"], src["name"], Path(src["dsf"]), Path(src["read_root"]))
+    runways = [RH.Runway(*r) for r in job.get("runways", [])]
+    hf = RH.HeightField.from_hgt(Path(job["dem_file"]), lat, lon, runways=runways,
+                                 feather_edges=job.get("feather", {}))
+    dsftool, seven = RH.platform_tools(Path(job["ortho4xp_root"]))
+    emit("step", step="reheight", index=0, total=1,
+         label=f"Applying LiDAR heights to {source.label}")
+    started = time.time()
+    stats = RH.reheight_tile((lat, lon), source, hf, Path(job["build_dir"]), Path(job["work_dir"]),
+                             dsftool, seven, log=lambda text: emit("log", message=text.strip()))
+    emit("log", message=f"{stats.changed:,} of {stats.vertices:,} vertices raised/lowered, "
+                        f"mean change {stats.mean_abs_delta:.1f} m, max {stats.max_delta:.0f} m")
+    emit("step_done", step="reheight", seconds=round(time.time() - started, 1))
+    emit("done", dsf=str(Path(job["build_dir"]) / RH.dsf_relpath(lat, lon)))
+    return 0
+
+
 def run_job(job: dict) -> int:
+    if job.get("mode") == "reheight":
+        return run_reheight(job)
     o4x_root = Path(job["ortho4xp_root"])
     work = Path(job["work_dir"])
     lat, lon = int(job["lat"]), int(job["lon"])

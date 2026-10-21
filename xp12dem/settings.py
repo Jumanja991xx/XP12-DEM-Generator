@@ -11,7 +11,8 @@ from .paths import settings_file
 @dataclass
 class Settings:
     xplane_path: str = ""
-    install_target: str = "autoortho"  # or "custom_scenery"
+    method: str = "improve"  # or "rebuild"
+    install_target: str = "autoortho"  # or "custom_scenery" (rebuild only)
     resolution: str = "1"
     mesh_detail: str = "high"
     parallel: int = 1

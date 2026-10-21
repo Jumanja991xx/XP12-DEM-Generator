@@ -37,10 +37,15 @@ def _cli_build(argv: list[str]) -> int:
     group.add_argument("--region", choices=[r.key for r in regions.PRESETS])
     group.add_argument("--tiles", help="comma separated tiles, e.g. +47+011,+46+011")
     parser.add_argument("--name", help="pack name (default: region name)")
+    parser.add_argument("--method", choices=["improve", "rebuild"], default="improve",
+                        help="improve = LiDAR heights for the terrain you already use (XPME, "
+                             "AutoOrtho, Ortho4XP, default scenery); rebuild = new Ortho4XP mesh "
+                             "for AutoOrtho")
     parser.add_argument("--resolution", choices=["1", "3"], default="1")
     parser.add_argument("--mesh", choices=[m.key for m in MESH_DETAILS], default="high")
     parser.add_argument("--xplane", type=Path, help="X-Plane 12 folder (auto-detected)")
-    parser.add_argument("--target", choices=["autoortho", "custom_scenery"], default="autoortho")
+    parser.add_argument("--target", choices=["autoortho", "custom_scenery"], default="autoortho",
+                        help="where a 'rebuild' pack goes ('improve' always uses Custom Scenery)")
     parser.add_argument("--dem-folder", type=Path, help="folder with your own Sonny .hgt/.zip files")
     parser.add_argument("--parallel", type=int, default=1)
     parser.add_argument("--no-install", action="store_true", help="only build, keep the pack in the work folder")
@@ -55,18 +60,20 @@ def _cli_build(argv: list[str]) -> int:
     xplane = args.xplane or next(iter(find_xplane12_installs()), None)
     if xplane is None:
         parser.error("X-Plane 12 not found, pass --xplane")
-    if args.target == "autoortho":
-        ao = read_autoortho_config()
+    ao = read_autoortho_config()
+    extra_roots = [ao.ao_scenery_dir] if ao and ao.ao_scenery_dir else []
+    if args.method == "improve" or args.target == "custom_scenery":
+        target = InstallTarget.for_custom_scenery(xplane)
+    else:
         if ao is None or ao.ao_scenery_dir is None:
             parser.error("AutoOrtho configuration (~/.autoortho) not found; use --target custom_scenery")
         target = InstallTarget.for_autoortho(ao, xplane)
-    else:
-        target = InstallTarget.for_custom_scenery(xplane)
 
     request = BuildRequest(tiles=tiles, region_name=name, slug=regions.slugify(name),
                            resolution_key=args.resolution, mesh_key=args.mesh, xplane=xplane,
                            target=target, local_dem_source=args.dem_folder,
-                           parallel=args.parallel, install=not args.no_install)
+                           parallel=args.parallel, install=not args.no_install,
+                           method=args.method, extra_roots=extra_roots)
     result = Pipeline(request, Events()).run()
     for tile, message in result.failed_tiles.items():
         print(f"FAILED {regions.tile_name(*tile)}: {message}")

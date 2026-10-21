@@ -25,12 +25,23 @@ from ..settings import Settings
 from ..xplane import find_xplane12_installs, is_xplane12, read_autoortho_config
 from .map_widget import TileMap
 
-STEPS = ("Region", "Resolution", "Create", "Done")
+STEPS = ("Region", "Method", "Create", "Done")
+METHODS = (
+    ("improve", "Improve my current terrain (recommended)",
+     "Works with XPME, AutoOrtho, Ortho4XP packs and X-Plane's default scenery. Keeps your "
+     "textures, water and roads and replaces only the heights with LiDAR data."),
+    ("rebuild", "Build a new, denser mesh (AutoOrtho only)",
+     "Ortho4XP builds a completely new mesh from the LiDAR data. Sharpest result, but the "
+     "photos must come from AutoOrtho."),
+)
 CUSTOM_KEY = "__custom__"
 
 # Rough per-tile build time in minutes on a mid-range CPU, used for estimates.
 _MINUTES = {("1", "balanced"): 3, ("1", "high"): 4, ("1", "maximum"): 6,
             ("3", "balanced"): 2, ("3", "high"): 3, ("3", "maximum"): 3}
+# "improve" mode: copy of the existing mesh, time dominated by DSF conversion.
+_IMPROVE_MINUTES = {"1": 2, "3": 2}
+_IMPROVE_MB = 35
 _PACK_MB = {("1", "balanced"): 35, ("1", "high"): 45, ("1", "maximum"): 60,
             ("3", "balanced"): 30, ("3", "high"): 35, ("3", "maximum"): 40}
 
@@ -153,7 +164,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 14, 24, 14)
         title = QLabel(APP_NAME)
         title.setObjectName("appTitle")
-        subtitle = QLabel("High-resolution terrain for X-Plane 12 from Sonny's LiDAR DTMs")
+        subtitle = QLabel("LiDAR terrain for X-Plane 12 - works with XPME, AutoOrtho and the default scenery")
         subtitle.setObjectName("appSubtitle")
         texts = QVBoxLayout()
         texts.addWidget(title)
@@ -303,10 +314,22 @@ class MainWindow(QMainWindow):
     def _build_quality_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(_title("2  Choose the DEM resolution"))
+        layout.addWidget(_title("2  Choose method and DEM resolution"))
+        self.method_group = QButtonGroup(self)
+        self.method_cards: list[OptionCard] = []
+        row = QHBoxLayout()
+        for key, title, text in METHODS:
+            card = OptionCard(title, text, self.method_group, key)
+            self.method_cards.append(card)
+            row.addWidget(card)
+        layout.addLayout(row)
+        self.method_group.buttonToggled.connect(lambda *_: self._method_changed())
+
+        layout.addSpacing(6)
+        layout.addWidget(QLabel("DEM resolution"))
         layout.addWidget(_hint("Sonny's models are LiDAR based and far more accurate than the "
-                               "SRTM/Viewfinder data used by X-Plane's default mesh and the stock "
-                               "AutoOrtho packs."))
+                               "SRTM/Viewfinder data used by X-Plane's default mesh, XPME and the "
+                               "stock AutoOrtho packs."))
         self.res_group = QButtonGroup(self)
         self.res_cards: list[OptionCard] = []
         row = QHBoxLayout()
@@ -316,8 +339,9 @@ class MainWindow(QMainWindow):
             row.addWidget(card)
         layout.addLayout(row)
 
-        layout.addSpacing(10)
-        layout.addWidget(QLabel("Mesh detail"))
+        layout.addSpacing(6)
+        self.mesh_label = QLabel("Mesh detail (new mesh only)")
+        layout.addWidget(self.mesh_label)
         self.mesh_group = QButtonGroup(self)
         self.mesh_cards: list[OptionCard] = []
         row = QHBoxLayout()
@@ -357,6 +381,19 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Folder with Sonny .hgt / .zip files")
         if folder:
             self.dem_folder_edit.setText(folder)
+
+    def _method_key(self) -> str:
+        for card in self.method_cards:
+            if card.radio.isChecked():
+                return card.key
+        return "improve"
+
+    def _method_changed(self) -> None:
+        rebuild = self._method_key() == "rebuild"
+        for card in self.mesh_cards:
+            card.setEnabled(rebuild)
+        self.mesh_label.setEnabled(rebuild)
+        self._update_status()
 
     def _res_key(self) -> str:
         for card in self.res_cards:
@@ -406,6 +443,8 @@ class MainWindow(QMainWindow):
         target_layout.addWidget(self.target_ao)
         target_layout.addWidget(self.target_cs)
         self.target_hint = _hint("")
+        self.target_hint.setTextFormat(Qt.RichText)
+        self.target_hint.setMinimumHeight(56)
         target_layout.addWidget(self.target_hint)
         layout.addLayout(top)
         layout.addWidget(target_box)
@@ -469,6 +508,8 @@ class MainWindow(QMainWindow):
     def _target(self) -> Optional[InstallTarget]:
         if self.xplane is None:
             return None
+        if self._method_key() == "improve":
+            return InstallTarget.for_custom_scenery(self.xplane)
         if self.target_ao.isChecked():
             ao = read_autoortho_config()
             if ao and ao.ao_scenery_dir:
@@ -482,13 +523,17 @@ class MainWindow(QMainWindow):
         detail = mesh_detail(self._mesh_key())
         name = self.name_edit.text().strip() or "My region"
         slug = regions.slugify(name)
-        minutes = _MINUTES[(res.key, detail.key)] * len(tiles) / max(1, self.parallel_spin.value())
+        method = self._method_key()
+        minutes = self._minutes(len(tiles))
         download_mb = 14 * len(tiles)
-        disk_mb = _PACK_MB[(res.key, detail.key)] * len(tiles)
+        per_tile = _IMPROVE_MB if method == "improve" else _PACK_MB[(res.key, detail.key)]
+        disk_mb = per_tile * len(tiles)
+        mesh_text = ("Mesh: your current terrain, LiDAR heights" if method == "improve"
+                     else f"Mesh: new Ortho4XP mesh ({detail.label})")
         self.summary_label.setText(
-            f"<b>{name}</b> &nbsp;→ scenery pack <code>{pack_name(slug)}</code><br>"
+            f"<b>{name}</b> &nbsp;→ scenery pack <code>{pack_name(slug, method)}</code><br>"
             f"{len(tiles)} tile(s): {regions.bounds(tiles)} &nbsp;·&nbsp; "
-            f"DEM: {res.label} &nbsp;·&nbsp; Mesh: {detail.label}<br>"
+            f"DEM: {res.label} &nbsp;·&nbsp; {mesh_text}<br>"
             f"Download ≈ {download_mb} MB &nbsp;·&nbsp; Disk ≈ {disk_mb} MB &nbsp;·&nbsp; "
             f"Build time ≈ {max(1, round(minutes))} min")
         self.build_map.set_selected(tiles)
@@ -496,6 +541,15 @@ class MainWindow(QMainWindow):
         self.xplane_label.setText(f"X-Plane 12: <b>{self.xplane}</b>" if self.xplane
                                   else "<b style='color:#ff8a65'>X-Plane 12 not found</b> - click Change…")
         ao = read_autoortho_config()
+        improve = method == "improve"
+        self.target_ao.setVisible(not improve)
+        self.target_cs.setVisible(not improve)
+        if improve:
+            self.target_hint.setText(self._sources_preview(tiles))
+            target_ok = self._target() is not None
+            busy = self.thread is not None and self.thread.isRunning()
+            self.create_btn.setEnabled(bool(tiles) and target_ok and not busy)
+            return
         if ao and ao.ao_scenery_dir:
             self.target_ao.setText(f"AutoOrtho (recommended) - {ao.ao_scenery_dir}")
             self.target_ao.setEnabled(True)
@@ -516,6 +570,42 @@ class MainWindow(QMainWindow):
         busy = self.thread is not None and self.thread.isRunning()
         self.create_btn.setEnabled(bool(tiles) and target_ok and not busy)
 
+    def _minutes(self, count: int) -> float:
+        if self._method_key() == "improve":
+            per_tile = _IMPROVE_MINUTES[self._res_key()]
+        else:
+            per_tile = _MINUTES[(self._res_key(), self._mesh_key())]
+        return per_tile * count / max(1, self.parallel_spin.value())
+
+    def _sources_preview(self, tiles) -> str:
+        """Which terrain each tile currently uses (shown before building)."""
+        if self.xplane is None:
+            return ""
+        from ..reheight import find_mesh_source
+
+        ao = read_autoortho_config()
+        roots = [ao.ao_scenery_dir] if ao and ao.ao_scenery_dir else []
+        name = self.name_edit.text().strip() or "My region"
+        own = pack_name(regions.slugify(name), "improve")
+        counts: dict[str, int] = {}
+        problems: set[str] = set()
+        for tile in tiles[:120]:
+            try:
+                src = find_mesh_source(tile, self.xplane, skip=[own], extra_roots=roots, strict=False)
+            except Exception:  # unreadable DSF etc. - reported again during the build
+                continue
+            counts[src.label] = counts.get(src.label, 0) + 1
+            problems.update(src.unreadable_above)
+        parts = ", ".join(f"<b>{label}</b> ({n})" for label, n in sorted(counts.items(), key=lambda x: -x[1]))
+        text = ("Installed to <code>Custom Scenery</code>, directly above the scenery it improves. "
+                f"Your current terrain for these tiles: {parts or '-'}. "
+                "Textures, water and roads stay those of that scenery.")
+        if problems:
+            text += ("<br><b style='color:#ff8a65'>Not readable: "
+                     f"{', '.join(sorted(problems))}</b> - if this is XPME or AutoOrtho, start it "
+                     "first so its terrain can be improved.")
+        return text
+
     # -- build control --------------------------------------------------
     def _start_build(self) -> None:
         target = self._target()
@@ -529,7 +619,8 @@ class MainWindow(QMainWindow):
             resolution_key=self._res_key(), mesh_key=self._mesh_key(), xplane=self.xplane,
             target=target,
             local_dem_source=Path(self.dem_folder_edit.text()) if self.dem_folder_edit.text().strip() else None,
-            parallel=self.parallel_spin.value())
+            parallel=self.parallel_spin.value(), method=self._method_key(),
+            extra_roots=self._extra_roots())
         existing = target.pack_dir(request.pack)
         if existing.exists():
             answer = QMessageBox.question(
@@ -555,6 +646,11 @@ class MainWindow(QMainWindow):
         self._append_log(f"Building {len(tiles)} tile(s) into {request.pack}")
         self._append_log(ATTRIBUTION)
         self.thread.start()
+
+    @staticmethod
+    def _extra_roots() -> list[Path]:
+        ao = read_autoortho_config()
+        return [ao.ao_scenery_dir] if ao and ao.ao_scenery_dir else []
 
     def _cancel_build(self) -> None:
         if self.pipeline:
@@ -621,14 +717,22 @@ class MainWindow(QMainWindow):
         return page
 
     def _show_done(self, result: BuildResult) -> None:
-        ao_mode = self.target_ao.isChecked()
+        improve = self._method_key() == "improve"
+        ao_mode = self.target_ao.isChecked() and not improve
         failed = ""
         if result.failed_tiles:
             failed = ("<p style='color:#ff8a65'><b>Some tiles failed:</b><br>" +
                       "<br>".join(f"{regions.tile_name(*t)}: {m}" for t, m in result.failed_tiles.items())
                       + "</p>")
-        steps = ("<li>Restart <b>AutoOrtho</b> so it mounts the new pack.</li>"
-                 if ao_mode else "")
+        if improve:
+            steps = ("<li>Keep the original scenery installed - XPME / AutoOrtho still deliver "
+                     "the textures. If XPME re-orders scenery_packs.ini, make sure "
+                     "<code>z_dem_…</code> stays above the XPME packages.</li>"
+                     "<li>Rebuild this pack after XPME / AutoOrtho update their base packages "
+                     "or after flattening an airport in XPME.</li>")
+        else:
+            steps = ("<li>Restart <b>AutoOrtho</b> so it mounts the new pack.</li>"
+                     if ao_mode else "")
         self.done_label.setText(
             f"<p style='font-size:15px'>✅ <b>{len(result.ok_tiles)} tile(s)</b> built in "
             f"{result.seconds / 60:.1f} min and installed to:<br><code>{result.installed_to}</code></p>"
@@ -637,8 +741,11 @@ class MainWindow(QMainWindow):
             "<li>Start X-Plane 12 and fly - the new terrain is used automatically.</li>"
             "<li>scenery_packs.ini was updated; a backup is stored as "
             "<code>scenery_packs.ini.xp12dem.bak</code>.</li></ol>"
-            f"<p class='hint'>{ATTRIBUTION}. Mesh built with Ortho4XP (GPL v3). "
-            "Vector data © OpenStreetMap contributors.</p>")
+            f"<p class='hint'>{ATTRIBUTION}. "
+            + ("Heights applied to your existing scenery with DSFTool."
+               if improve else
+               "Mesh built with Ortho4XP (GPL v3). Vector data © OpenStreetMap contributors.")
+            + "</p>")
         self._go(3)
 
     def _open_pack(self) -> None:
@@ -663,6 +770,9 @@ class MainWindow(QMainWindow):
         self.parallel_spin.setValue(max(1, s.parallel))
         self.dem_folder_edit.setText(s.local_dem_folder)
         (self.target_cs if s.install_target == "custom_scenery" else self.target_ao).setChecked(True)
+        for card in self.method_cards:
+            card.radio.setChecked(card.key == s.method)
+        self._method_changed()
         keys = [self.region_list.item(i).data(Qt.UserRole) for i in range(self.region_list.count())]
         row = keys.index(s.last_region) if s.last_region in keys else 0
         self.region_list.setCurrentRow(row)
@@ -675,6 +785,7 @@ class MainWindow(QMainWindow):
         s.parallel = self.parallel_spin.value()
         s.local_dem_folder = self.dem_folder_edit.text().strip()
         s.install_target = "autoortho" if self.target_ao.isChecked() else "custom_scenery"
+        s.method = self._method_key()
         current = self.region_list.currentItem()
         s.last_region = current.data(Qt.UserRole) if current else s.last_region
         if s.last_region == CUSTOM_KEY:
@@ -686,11 +797,9 @@ class MainWindow(QMainWindow):
 
     def _update_status(self, *_args) -> None:
         tiles = self.map.selected() if hasattr(self, "map") else []
-        if not hasattr(self, "res_cards"):
+        if not hasattr(self, "mesh_cards") or not hasattr(self, "parallel_spin"):
             return
-        res = self._res_key()
-        detail = self._mesh_key()
-        minutes = _MINUTES[(res, detail)] * len(tiles) / max(1, self.parallel_spin.value())
+        minutes = self._minutes(len(tiles))
         self.status_label.setText(
             f"{len(tiles)} tile(s) selected · {regions.bounds(tiles)} · "
             f"≈ {max(1, round(minutes)) if tiles else 0} min build time")

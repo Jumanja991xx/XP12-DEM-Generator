@@ -14,6 +14,8 @@ from .main_window import MainWindow
 STYLE = """
 QWidget { background: #141b22; color: #e6edf3; font-size: 13px; }
 QLabel, QRadioButton, QCheckBox { background: transparent; }
+QLabel:disabled, QRadioButton:disabled { color: #4f5d6b; }
+QFrame#card:disabled { border-color: #222d38; background: #172029; }
 QFrame#header { background: #0e1419; border-bottom: 1px solid #263240; }
 QFrame#footer { background: #0e1419; border-top: 1px solid #263240; }
 QLabel#appTitle { font-size: 20px; font-weight: 600; background: transparent; }

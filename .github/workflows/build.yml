@@ -48,6 +48,8 @@ jobs:
           # smoke test uses a pre-seeded (empty) OSM cache for the tile. Everything
           # else - DEM download, worker exe, Triangle4XP, DSF writing, install - is real.
           python packaging/ci_seed_osm.py "$env:XP12DEM_DATA" 47 11
+          "XP=$xp" >> $env:GITHUB_ENV
+          "XP12DEM_DATA=$env:XP12DEM_DATA" >> $env:GITHUB_ENV
           $p = Start-Process -FilePath "dist\XP12DEMGenerator\XP12DEMGenerator.exe" -Wait -PassThru -ArgumentList @(
             "build", "--tiles", "+47+011", "--name", "`"CI Smoke`"", "--resolution", "3",
             "--mesh", "balanced", "--xplane", "`"$xp`"", "--target", "custom_scenery")
@@ -64,6 +66,25 @@ jobs:
           if (Test-Path "$xp\Custom Scenery\scenery_packs.ini") { $diag += Get-Content "$xp\Custom Scenery\scenery_packs.ini" }
           $text = (($diag | ForEach-Object { "$_" -replace '%', '%25' -replace "`r", '' }) -join "%0A") -replace "::", ": :"
           if ($ok) { Write-Output "::notice title=Smoke test::$text" } else { Write-Output "::error title=Smoke test::$text"; exit 1 }
+      - name: Smoke test - improve existing terrain (XPME / no-ortho mode)
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          # The pack from the previous step acts as the "existing" terrain (like an XPME
+          # base package); the app must find it, re-height it and install above it.
+          $p = Start-Process -FilePath "dist\XP12DEMGenerator\XP12DEMGenerator.exe" -Wait -PassThru -ArgumentList @(
+            "build", "--method", "improve", "--tiles", "+47+011", "--name", "`"CI Improve`"",
+            "--resolution", "1", "--xplane", "`"$env:XP`"")
+          $pack = "$env:XP\Custom Scenery\z_dem_ci_improve"
+          $dsf = "$pack\Earth nav data\+40+010\+47+011.dsf"
+          $ok = ($p.ExitCode -eq 0) -and (Test-Path $dsf)
+          $diag = @("exit=$($p.ExitCode) dsf=$(Test-Path $dsf)")
+          if (Test-Path "$env:XP12DEM_DATA\logs\cli.log") { $diag += Get-Content "$env:XP12DEM_DATA\logs\cli.log" -Tail 30 }
+          if (Test-Path "$env:XP12DEM_DATA\logs\+47+011.log") { $diag += Get-Content "$env:XP12DEM_DATA\logs\+47+011.log" -Tail 15 | Where-Object { $_ -notmatch '"kind": "bar"' } }
+          if (Test-Path "$pack\terrain") { $diag += (Get-ChildItem "$pack\terrain" | Select-Object -First 1 | Get-Content) }
+          $diag += Get-Content "$env:XP\Custom Scenery\scenery_packs.ini"
+          $text = (($diag | ForEach-Object { "$_" -replace '%', '%25' -replace "`r", '' }) -join "%0A") -replace "::", ": :"
+          if ($ok) { Write-Output "::notice title=Improve smoke test::$text" } else { Write-Output "::error title=Improve smoke test::$text"; exit 1 }
       - name: Overpass reachability (informational)
         continue-on-error: true
         timeout-minutes: 5

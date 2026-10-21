@@ -1,0 +1,596 @@
+"""Improve the elevation of the terrain mesh you already use.
+
+Instead of building a new mesh (which only works with the program that serves
+its textures), this mode takes the base-mesh DSF that X-Plane currently uses
+for a tile - an XPME base package, an AutoOrtho / Ortho4XP pack or the default
+X-Plane 12 Global Scenery - and replaces only the vertex elevations (and the
+vertex normals used for shading) with values from Sonny's LiDAR DTM.
+
+Everything else stays: triangulation, terrain types, textures, water, roads,
+forests and objects. Terrain definitions that live inside the source pack are
+copied into the new pack with their texture paths pointing back to the
+source pack, so XPME / AutoOrtho keep serving the photos.
+
+Elevations are left unchanged
+* on water patches (lake and sea surfaces stay flat),
+* around runways (airport flattening done by X-Plane, XPME or Ortho4XP stays),
+* towards tile edges whose neighbour is not processed (no steps at seams),
+with smooth transitions in between.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Iterable, Optional
+
+import numpy as np
+
+from .regions import Tile, dsf_relpath
+
+LIB_PREFIXES = ("lib/",)
+WATER_DEFS = {"terrain_water"}
+NODATA = -32768.0
+RUNWAY_KEEP_M = 120.0  # beyond the runway half width: keep source heights
+RUNWAY_BLEND_M = 450.0  # then blend to LiDAR heights over this distance
+EDGE_BLEND_DEG = 0.02  # feather towards unprocessed neighbour tiles (~2 km)
+CHUNK = 200_000
+
+Log = Callable[[str], None]
+
+
+# ---------------------------------------------------------------------------
+# Finding the active base mesh
+# ---------------------------------------------------------------------------
+@dataclass
+class MeshSource:
+    kind: str  # "pack" or "global"
+    name: str  # pack folder name, or "X-Plane 12 Global Scenery"
+    dsf: Path  # file to read
+    read_root: Path  # where the pack's files can be read (.ter etc.)
+    unreadable_above: list[str] = field(default_factory=list)  # empty packs with higher priority
+
+    @property
+    def label(self) -> str:
+        return self.name if self.kind == "pack" else "X-Plane 12 Global Scenery (default)"
+
+
+def enabled_packs(custom_scenery: Path) -> list[str]:
+    """Pack folder names in scenery_packs.ini priority order (enabled only)."""
+    ini = custom_scenery / "scenery_packs.ini"
+    if not ini.is_file():
+        return []
+    names = []
+    for line in ini.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line.startswith("SCENERY_PACK "):
+            continue
+        path = line[len("SCENERY_PACK "):].strip().replace("\\", "/").rstrip("/")
+        if path.startswith("*"):
+            continue
+        names.append(path.rsplit("/", 1)[-1])
+    return names
+
+
+def read_dsf_properties(path: Path, seven_zip: Optional[str] = None,
+                        tmp_dir: Optional[Path] = None) -> dict[str, str]:
+    """Read the PROP atom of a (possibly 7-Zip compressed) DSF."""
+    data_path = ensure_uncompressed(path, seven_zip, tmp_dir) if tmp_dir else path
+    with open(data_path, "rb") as handle:
+        if handle.read(8) != b"XPLNEDSF":
+            return {}
+        handle.read(4)
+        size = data_path.stat().st_size - 16
+        while handle.tell() < size:
+            header = handle.read(8)
+            if len(header) < 8:
+                break
+            atom_id, atom_len = header[:4], struct.unpack("<I", header[4:])[0]
+            if atom_id == b"DAEH":  # 'HEAD' stored little endian
+                end = handle.tell() + atom_len - 8
+                while handle.tell() < end:
+                    sub = handle.read(8)
+                    sub_id, sub_len = sub[:4], struct.unpack("<I", sub[4:])[0]
+                    body = handle.read(sub_len - 8)
+                    if sub_id == b"PORP":
+                        parts = body.split(b"\0")
+                        return {parts[i].decode("latin-1"): parts[i + 1].decode("latin-1")
+                                for i in range(0, len(parts) - 1, 2)}
+                return {}
+            handle.seek(atom_len - 8, os.SEEK_CUR)
+    return {}
+
+
+class SourceUnavailable(RuntimeError):
+    """A pack above the found mesh exists but cannot be read (virtual mount not running?)."""
+
+    def __init__(self, tile: Tile, packs: list[str]):
+        self.packs = packs
+        super().__init__(
+            f"Tile {tile}: scenery pack(s) {', '.join(packs)} are listed in scenery_packs.ini but "
+            "their folders are empty or missing. If they belong to XPME or AutoOrtho, start that "
+            "program first so its scenery can be read, then build again.")
+
+
+def _is_improved_pack(folder: Path) -> bool:
+    """Packs made by this mode are never used as a source (no chaining)."""
+    if folder.name.lower().startswith("z_dem_"):
+        return True
+    manifest = folder / "xp12dem_pack.json"
+    try:
+        return '"method": "improve"' in manifest.read_text("utf-8")
+    except OSError:
+        return False
+
+
+def _empty_or_missing(folder: Path) -> bool:
+    try:
+        return not any(folder.iterdir())
+    except OSError:
+        return True
+
+
+def find_mesh_source(tile: Tile, xplane: Path, *, skip: Iterable[str] = (),
+                     extra_roots: Iterable[Path] = (), seven_zip: Optional[str] = None,
+                     tmp_dir: Optional[Path] = None, strict: bool = True) -> MeshSource:
+    """Return the base mesh X-Plane uses for ``tile``.
+
+    ``extra_roots`` are folders where packs can be read when their Custom
+    Scenery entry is a virtual mount that is not running (e.g. AutoOrtho's
+    ``z_autoortho/scenery``). With ``strict``, packs that are listed but
+    unreadable (empty folder = mount not running) raise
+    :class:`SourceUnavailable` instead of silently falling through to a
+    lower-priority mesh.
+    """
+    custom = xplane / "Custom Scenery"
+    rel = dsf_relpath(*tile)
+    skip = {s.lower() for s in skip}
+    unreadable: list[str] = []
+    extra_roots = [Path(r) for r in extra_roots]
+    for name in enabled_packs(custom):
+        if name.lower() in skip or _is_improved_pack(custom / name):
+            continue
+        roots = [custom / name] + [r / name for r in extra_roots]
+        if all(_empty_or_missing(root) for root in roots):
+            unreadable.append(name)
+            continue
+        for root in roots:
+            dsf = root / rel
+            if dsf.is_file():
+                props = read_dsf_properties(dsf, seven_zip, tmp_dir)
+                if props.get("sim/overlay", "0").strip() == "1":
+                    break  # overlay only (roads/objects), not a base mesh
+                return MeshSource("pack", name, dsf, root, list(unreadable))
+    if unreadable and strict:
+        raise SourceUnavailable(tile, unreadable)
+    global_root = xplane / "Global Scenery" / "X-Plane 12 Global Scenery"
+    return MeshSource("global", "X-Plane 12 Global Scenery", global_root / rel, global_root)
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+def ensure_uncompressed(path: Path, seven_zip: Optional[str], tmp_dir: Path) -> Path:
+    with open(path, "rb") as handle:
+        magic = handle.read(2)
+    if magic != b"7z":
+        return path
+    if not seven_zip:
+        raise RuntimeError(f"{path.name} is 7-Zip compressed and 7-Zip is not available")
+    out_dir = tmp_dir / "unz"
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    subprocess.run([seven_zip, "e", "-y", f"-o{out_dir}", str(path)], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
+    files = [p for p in out_dir.iterdir() if p.is_file()]
+    if len(files) != 1:
+        raise RuntimeError(f"Unexpected content when unpacking {path}")
+    target = tmp_dir / (path.stem + ".unpacked.dsf")
+    os.replace(files[0], target)
+    shutil.rmtree(out_dir, ignore_errors=True)
+    return target
+
+
+def run_dsftool(dsftool: str, *args: str) -> None:
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    proc = subprocess.run([dsftool, *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, errors="replace", creationflags=flags)
+    if proc.returncode != 0:
+        raise RuntimeError(f"DSFTool {args[0]} failed: {proc.stdout[-500:]}")
+
+
+# ---------------------------------------------------------------------------
+# Height field
+# ---------------------------------------------------------------------------
+@dataclass
+class Runway:
+    lat1: float
+    lon1: float
+    lat2: float
+    lon2: float
+    half_width: float
+
+
+@dataclass
+class HeightField:
+    """LiDAR heights for one tile plus the masks that decide where to use them."""
+
+    lat: int
+    lon: int
+    grid: np.ndarray  # (n, n) float32, north row first (hgt order), NaN = nodata
+    runways: list[Runway] = field(default_factory=list)
+    feather_edges: dict[str, bool] = field(default_factory=dict)  # n/s/e/w -> feather?
+
+    @classmethod
+    def from_hgt(cls, path: Path, lat: int, lon: int, **kwargs) -> "HeightField":
+        size = int(round(math.sqrt(path.stat().st_size / 2)))
+        grid = np.fromfile(path, ">i2").reshape(size, size).astype(np.float32)
+        grid[grid <= -32000] = np.nan
+        return cls(lat, lon, grid, **kwargs)
+
+    @property
+    def n(self) -> int:
+        return self.grid.shape[0]
+
+    def _rc(self, lon: np.ndarray, lat: np.ndarray):
+        col = (lon - self.lon) * (self.n - 1)
+        row = (self.lat + 1 - lat) * (self.n - 1)
+        return np.clip(row, 0, self.n - 1), np.clip(col, 0, self.n - 1)
+
+    def sample(self, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
+        row, col = self._rc(lon, lat)
+        r0 = np.minimum(np.floor(row).astype(np.int64), self.n - 2)
+        c0 = np.minimum(np.floor(col).astype(np.int64), self.n - 2)
+        fr, fc = row - r0, col - c0
+        g = self.grid
+        top = g[r0, c0] * (1 - fc) + g[r0, c0 + 1] * fc
+        bottom = g[r0 + 1, c0] * (1 - fc) + g[r0 + 1, c0 + 1] * fc
+        return top * (1 - fr) + bottom * fr
+
+    def normals(self, lon: np.ndarray, lat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """(east, south) components of the unit surface normal."""
+        step = 2.0 / (self.n - 1) if self.n > 2000 else 1.0 / (self.n - 1)
+        mid_lat = np.radians(lat)
+        dx = 6371000.0 * np.radians(step) * np.cos(mid_lat)
+        dy = 6371000.0 * np.radians(step)
+        dzdx = (self.sample(lon + step, lat) - self.sample(lon - step, lat)) / (2 * dx)
+        dzdy = (self.sample(lon, lat + step) - self.sample(lon, lat - step)) / (2 * dy)
+        norm = np.sqrt(dzdx ** 2 + dzdy ** 2 + 1.0)
+        return -dzdx / norm, dzdy / norm  # east, south
+
+    def weight(self, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
+        """0 = keep source height, 1 = use LiDAR height."""
+        w = np.ones_like(lon, dtype=np.float64)
+        for rwy in self.runways:
+            d = _distance_to_segment_m(lon, lat, rwy)
+            w = np.minimum(w, _smoothstep((d - rwy.half_width - RUNWAY_KEEP_M) / RUNWAY_BLEND_M))
+        edge = {
+            "w": lon - self.lon, "e": self.lon + 1 - lon,
+            "s": lat - self.lat, "n": self.lat + 1 - lat,
+        }
+        for side, dist in edge.items():
+            if self.feather_edges.get(side, True):
+                w = np.minimum(w, _smoothstep(dist / EDGE_BLEND_DEG))
+        return w
+
+
+def _smoothstep(x):
+    x = np.clip(x, 0.0, 1.0)
+    return x * x * (3 - 2 * x)
+
+
+def _distance_to_segment_m(lon, lat, rwy: Runway) -> np.ndarray:
+    k = math.cos(math.radians((rwy.lat1 + rwy.lat2) / 2)) * 111_320.0
+    ax, ay = rwy.lon1 * k, rwy.lat1 * 110_574.0
+    bx, by = rwy.lon2 * k, rwy.lat2 * 110_574.0
+    px, py = lon * k, lat * 110_574.0
+    vx, vy = bx - ax, by - ay
+    length2 = vx * vx + vy * vy or 1.0
+    t = np.clip(((px - ax) * vx + (py - ay) * vy) / length2, 0.0, 1.0)
+    return np.hypot(px - (ax + t * vx), py - (ay + t * vy))
+
+
+def load_runways(apt_files: Iterable[Path], tiles: Iterable[Tile], margin: float = 0.05) -> dict[Tile, list[Runway]]:
+    """Land runways (apt.dat row code 100) touching each tile."""
+    tiles = list(tiles)
+    result: dict[Tile, list[Runway]] = {t: [] for t in tiles}
+    if not tiles:
+        return result
+    lat_min = min(t[0] for t in tiles) - margin
+    lat_max = max(t[0] for t in tiles) + 1 + margin
+    lon_min = min(t[1] for t in tiles) - margin
+    lon_max = max(t[1] for t in tiles) + 1 + margin
+    seen = set()
+    for apt in apt_files:
+        try:
+            handle = open(apt, "r", encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                if not line.startswith("100 "):
+                    continue
+                parts = line.split()
+                try:
+                    width = float(parts[1])
+                    lat1, lon1 = float(parts[9]), float(parts[10])
+                    lat2, lon2 = float(parts[18]), float(parts[19])
+                except (IndexError, ValueError):
+                    continue
+                if not (lat_min <= lat1 <= lat_max and lon_min <= lon1 <= lon_max):
+                    continue
+                key = (round(lat1, 4), round(lon1, 4), round(lat2, 4), round(lon2, 4))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rwy = Runway(lat1, lon1, lat2, lon2, width / 2)
+                for tile in tiles:
+                    t_lat, t_lon = tile
+                    if (t_lat - margin <= min(lat1, lat2) <= t_lat + 1 + margin
+                            or t_lat - margin <= max(lat1, lat2) <= t_lat + 1 + margin) and \
+                            (t_lon - margin <= min(lon1, lon2) <= t_lon + 1 + margin
+                             or t_lon - margin <= max(lon1, lon2) <= t_lon + 1 + margin):
+                        result[tile].append(rwy)
+    return result
+
+
+def apt_files_for(xplane: Path, packs: Iterable[str]) -> list[Path]:
+    files = [xplane / "Global Scenery" / "Global Airports" / "Earth nav data" / "apt.dat"]
+    for name in packs:
+        files.append(xplane / "Custom Scenery" / name / "Earth nav data" / "apt.dat")
+    return [f for f in files if f.is_file()]
+
+
+# ---------------------------------------------------------------------------
+# DSF text rewriting
+# ---------------------------------------------------------------------------
+_PATH_EXT = re.compile(r"\.(dds|png|bmp|ter|pol|dcl|for|fac|obj|net|lin|str|agp)$", re.IGNORECASE)
+
+
+def rewrite_ter(text: str, ter_rel: str, source_pack: str) -> str:
+    """Point relative file references of a .ter at the source pack.
+
+    The copy lives at ``<new pack>/<ter_rel>``; references are resolved
+    against the original location ``<source pack>/<ter_rel>``.
+    """
+    ter_dir = Path(ter_rel).parent
+    up = "../" * (len(ter_dir.parts) + 1)
+    out = []
+    for line in text.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and _PATH_EXT.search(parts[1].strip()) and not parts[1].startswith(LIB_PREFIXES):
+            ref = parts[1].strip().replace("\\", "/")
+            resolved = os.path.normpath(os.path.join(str(ter_dir), ref)).replace("\\", "/")
+            if not resolved.startswith(".."):
+                line = f"{parts[0]} {up}{source_pack}/{resolved}"
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def _is_water_ter(path: Path) -> bool:
+    try:
+        return any(line.strip() == "WET" for line in path.read_text("utf-8", "replace").splitlines())
+    except OSError:
+        return False
+
+
+@dataclass
+class ReheightStats:
+    vertices: int = 0
+    changed: int = 0
+    max_delta: float = 0.0
+    mean_abs_delta: float = 0.0
+    copied_terrains: int = 0
+    rasters: int = 0
+
+
+def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: MeshSource,
+                      out_pack: Path, work: Path, log: Log = print) -> ReheightStats:
+    """Rewrite a DSFTool text file with LiDAR elevations."""
+    stats = ReheightStats()
+    defs: list[str] = []
+    water_ids: set[int] = set()
+
+    # Pass 1: terrain definitions and vertices on water patches.
+    water_keys: set[tuple[int, int]] = set()
+    current_water = False
+    with open(src_txt, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if line.startswith("PATCH_VERTEX"):
+                if current_water:
+                    p = line.split(None, 3)
+                    water_keys.add((round(float(p[1]) * 1e7), round(float(p[2]) * 1e7)))
+            elif line.startswith("TERRAIN_DEF"):
+                name = line.split(None, 1)[1].strip()
+                if name.lower() in WATER_DEFS or (
+                        not name.startswith(LIB_PREFIXES) and _is_water_ter(source.read_root / name)):
+                    water_ids.add(len(defs))
+                defs.append(name)
+            elif line.startswith("BEGIN_PATCH"):
+                current_water = int(line.split()[1]) in water_ids
+
+    # Copy local terrain definitions so their textures point back to the source pack.
+    if source.kind == "pack":
+        for name in defs:
+            if name.startswith(LIB_PREFIXES) or name.lower() in WATER_DEFS:
+                continue
+            src = source.read_root / name
+            if src.is_file():
+                dst = out_pack / name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(rewrite_ter(src.read_text("utf-8", "replace"), name, source.name),
+                               encoding="utf-8")
+                stats.copied_terrains += 1
+
+    # Pass 2: write the new text file.
+    deltas: list[float] = []
+    current_water = False
+    buffer: list[str] = []
+
+    def flush() -> None:
+        if not buffer:
+            return
+        rows = [line.split() for line in buffer]
+        width = max(len(r) for r in rows)
+        same = all(len(r) == width for r in rows)
+        if not same:  # unusual: mixed widths, process one by one
+            for r in rows:
+                _write_vertices([r], out)
+        else:
+            _write_vertices(rows, out)
+        buffer.clear()
+
+    def _write_vertices(rows, sink) -> None:
+        arr = np.array([[float(v) for v in r[1:]] for r in rows], dtype=np.float64)
+        lon, lat, elev = arr[:, 0], arr[:, 1], arr[:, 2]
+        keep = elev <= NODATA + 1  # "use raster" marker
+        new = hf.sample(lon, lat)
+        w = hf.weight(lon, lat)
+        valid = ~np.isnan(new) & ~keep
+        target = np.where(valid, elev + w * (np.nan_to_num(new) - elev), elev)
+        stats.vertices += len(rows)
+        changed = valid & (np.abs(target - elev) > 0.05)
+        stats.changed += int(changed.sum())
+        if changed.any():
+            d = np.abs(target - elev)[changed]
+            stats.max_delta = max(stats.max_delta, float(d.max()))
+            deltas.append(float(d.sum()))
+        arr[:, 2] = target
+        if arr.shape[1] >= 5:
+            plausible = (np.abs(arr[:, 3]) <= 1.0) & (np.abs(arr[:, 4]) <= 1.0)
+            ne, ns = hf.normals(lon, lat)
+            upd = valid & plausible & ~np.isnan(ne) & ~np.isnan(ns)
+            arr[:, 3] = np.where(upd, arr[:, 3] + w * (ne - arr[:, 3]), arr[:, 3])
+            arr[:, 4] = np.where(upd, arr[:, 4] + w * (ns - arr[:, 4]), arr[:, 4])
+        for row in arr:
+            sink.write("PATCH_VERTEX " + " ".join(f"{v:.9f}" for v in row) + "\n")
+
+    with open(src_txt, "r", encoding="utf-8", errors="replace") as handle, \
+            open(dst_txt, "w", encoding="utf-8", newline="\n") as out:
+        for line in handle:
+            if line.startswith("PATCH_VERTEX"):
+                if current_water:
+                    flush()
+                    out.write(line)
+                    stats.vertices += 1
+                    continue
+                p = line.split(None, 3)
+                if (round(float(p[1]) * 1e7), round(float(p[2]) * 1e7)) in water_keys:
+                    flush()
+                    out.write(line)  # shoreline vertex shared with water: keep
+                    stats.vertices += 1
+                    continue
+                buffer.append(line)
+                if len(buffer) >= CHUNK:
+                    flush()
+                continue
+            flush()
+            if line.startswith("BEGIN_PATCH"):
+                current_water = int(line.split()[1]) in water_ids
+            elif line.startswith("RASTER_DATA"):
+                line = _rewrite_raster(line, hf, work, stats, log)
+            out.write(line)
+        flush()
+    if stats.changed:
+        stats.mean_abs_delta = sum(deltas) / stats.changed
+    return stats
+
+
+_RASTER_RE = re.compile(r"RASTER_DATA version=(\d+) bpp=(\d+) flags=(\d+) width=(\d+) "
+                        r"height=(\d+) scale=([-\d.eE+]+) offset=([-\d.eE+]+) (.+)$")
+
+
+def _rewrite_raster(line: str, hf: HeightField, work: Path, stats: ReheightStats, log: Log) -> str:
+    """Replace the first raster (XP12 'elevation') with LiDAR heights."""
+    match = _RASTER_RE.match(line.strip())
+    if not match or stats.rasters:  # only the first raster is the elevation raster
+        stats.rasters += 1 if match else 0
+        return line
+    stats.rasters += 1
+    version, bpp, flags, width, height = (int(match[i]) for i in range(1, 6))
+    scale, offset, path = float(match[6]), float(match[7]), Path(match[8])
+    if bpp == 2:
+        dtype = np.dtype("<i2") if flags & 1 else np.dtype("<u2")
+    elif bpp == 4 and flags & 2:
+        dtype = np.dtype("<f4")
+    elif bpp == 4:
+        dtype = np.dtype("<i4") if flags & 1 else np.dtype("<u4")
+    elif bpp == 1:
+        dtype = np.dtype("i1") if flags & 1 else np.dtype("u1")
+    else:
+        log(f"   raster with bpp={bpp} flags={flags} left unchanged")
+        return line
+    try:
+        raw = np.fromfile(path, dtype).reshape(height, width).astype(np.float64)
+    except (OSError, ValueError):
+        log("   could not read elevation raster - left unchanged")
+        return line
+    old = raw * scale + offset
+    # DSF rasters start at the south-west corner, rows go northwards.
+    lats = hf.lat + np.arange(height) / max(height - 1, 1)
+    lons = hf.lon + np.arange(width) / max(width - 1, 1)
+    glon, glat = np.meshgrid(lons, lats)
+    new = hf.sample(glon.ravel(), glat.ravel()).reshape(height, width)
+    w = hf.weight(glon.ravel(), glat.ravel()).reshape(height, width)
+    merged = np.where(np.isnan(new), old, old + w * (np.nan_to_num(new) - old))
+    encoded = np.round((merged - offset) / (scale or 1.0))
+    info = np.iinfo(dtype) if dtype.kind in "iu" else None
+    if info is not None:
+        encoded = np.clip(encoded, info.min, info.max)
+    out_path = work / f"raster_elevation_{hf.lat}_{hf.lon}.raw"
+    encoded.astype(dtype).tofile(out_path)
+    return (f"RASTER_DATA version={version} bpp={bpp} flags={flags} width={width} height={height} "
+            f"scale={scale:.6f} offset={offset:.6f} {out_path}\n")
+
+
+# ---------------------------------------------------------------------------
+# One tile end to end
+# ---------------------------------------------------------------------------
+def reheight_tile(tile: Tile, source: MeshSource, hf: HeightField, out_pack: Path,
+                  work: Path, dsftool: str, seven_zip: Optional[str],
+                  log: Log = print) -> ReheightStats:
+    work.mkdir(parents=True, exist_ok=True)
+    if not source.dsf.is_file():
+        raise FileNotFoundError(f"Source DSF not found: {source.dsf}")
+    log(f"   source mesh: {source.label}")
+    plain = ensure_uncompressed(source.dsf, seven_zip, work)
+    src_txt = work / "source.txt"
+    dst_txt = work / "lidar.txt"
+    log("   converting DSF to text")
+    run_dsftool(dsftool, "--dsf2text", str(plain), str(src_txt))
+    log("   applying LiDAR elevations")
+    stats = reheight_dsf_text(src_txt, dst_txt, hf, source, out_pack, work, log)
+    target = out_pack / dsf_relpath(*tile)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    log("   writing new DSF")
+    run_dsftool(dsftool, "--text2dsf", str(dst_txt), str(target))
+    for tmp in (src_txt, dst_txt):
+        tmp.unlink(missing_ok=True)
+    if plain != source.dsf:
+        plain.unlink(missing_ok=True)
+    for raw in work.glob("*.raw"):  # rasters exported by DSFTool and our rewrites
+        raw.unlink(missing_ok=True)
+    return stats
+
+
+def platform_tools(o4x_root: Path) -> tuple[str, Optional[str]]:
+    """Paths of DSFTool and 7-Zip shipped with the vendored Ortho4XP."""
+    if sys.platform.startswith("win"):
+        utils = o4x_root / "Utils" / "win"
+        return str(utils / "DSFTool.exe"), str(utils / "7z.exe")
+    sub = "mac" if sys.platform == "darwin" else "lin"
+    dsftool = o4x_root / "Utils" / sub / "DSFTool"
+    try:
+        dsftool.chmod(dsftool.stat().st_mode | 0o111)
+    except OSError:
+        pass
+    return str(dsftool), shutil.which("7z") or shutil.which("7za") or shutil.which("7zz")
