@@ -153,7 +153,7 @@ step is visible. The map colours show the result before you build (hover a tile 
   zip. If the server does not allow that, the log names the zip to download from
   [data.bris.ac.uk](https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn) into the
   *Own elevation files* folder; meanwhile Copernicus GLO-30 is used.
-* Australia: FABDEM, with Geoscience Australia's 1″ DEM-H as fallback.
+* Australia: FABDEM; free LiDAR (1–5 m) from ELVIS can be added as own files.
 * **Own elevation files** (step 2, Advanced): any GeoTIFF in any projection (found by its
   coordinates, not its name), SRTM `.hgt`, Sonny `.zip`, FABDEM zip/`.tif`. These files win over
   everything else. Free 1–10 m data you can add this way: swissALTI3D (swisstopo), Austria's

@@ -67,11 +67,6 @@ Geospatial Information Authority of Japan (国土地理院) elevation tiles
 (https://maps.gsi.go.jp/development/ichiran.html), read at run time with
 attribution as required by the GSI terms of use.
 
-## Geoscience Australia 1" DEM-H — CC BY 4.0
-
-© Commonwealth of Australia (Geoscience Australia), used as a fallback for
-Australian tiles via its public WCS service.
-
 ## tifffile / imagecodecs — BSD
 
 https://github.com/cgohlke/tifffile , https://github.com/cgohlke/imagecodecs

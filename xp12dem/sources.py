@@ -572,36 +572,6 @@ class GsiSource(Source):
 
 
 # ---------------------------------------------------------------------------
-# Australia - Geoscience Australia 1" DEM-H (WCS)
-# ---------------------------------------------------------------------------
-class GaSource(Source):
-    key = "ga"
-    label = "Geoscience Australia 1\" DEM-H"
-    licence = "Elevation data: Geoscience Australia, CC BY 4.0"
-    native_m = 30.0
-    SERVICE = ("https://services.ga.gov.au/gis/services/DEM_SRTM_1Second_Hydro_Enforced/"
-               "MapServer/WCSServer")
-
-    def fetch(self, ctx, lat, lon, n):
-        caps = ctx.cached_text("ga_wcs.xml", self.SERVICE + "?SERVICE=WCS&VERSION=1.0.0&REQUEST=GetCapabilities")
-        names = re.findall(r"<(?:\w+:)?name>([^<]+)</(?:\w+:)?name>", caps)
-        coverage = names[0] if names else "1"
-        url = (f"{self.SERVICE}?SERVICE=WCS&VERSION=1.0.0&REQUEST=GetCoverage&COVERAGE={coverage}"
-               f"&CRS=EPSG:4326&BBOX={lon - 0.01},{lat - 0.01},{lon + 1.01},{lat + 1.01}"
-               f"&WIDTH=3673&HEIGHT=3673&FORMAT=GeoTIFF")
-        data = _download(ctx, url, attempts=3)
-        if not data or not data.startswith((b"II", b"MM")):
-            raise NotAvailable("Geoscience Australia service returned no data")
-        with R.TiffSource(io.BytesIO(data)) as src:
-            epsg, west, north, width, height, w, h = src.georef()
-            r = src.read_window((west, north - height, west + width, north), 0.0)
-        grid = R.resample_to_tile([r], lat, lon, n)
-        if R.valid_fraction(grid) < 0.01:
-            raise NotAvailable("outside Australia")
-        return grid
-
-
-# ---------------------------------------------------------------------------
 # The user's own files (any GeoTIFF in any projection, SRTM .hgt)
 # ---------------------------------------------------------------------------
 class LocalSource(Source):
@@ -701,7 +671,7 @@ class LocalSource(Source):
 
 SOURCES: dict[str, Source] = {s.key: s for s in (
     LocalSource(), SonnySource(), UsgsSource(), FabdemSource(), Glo30Source(), LinzSource(),
-    HrdemSource(), MrdemSource(), ArcticSource(), GsiSource(), GaSource())}
+    HrdemSource(), MrdemSource(), ArcticSource(), GsiSource())}
 
 
 def source(key: str) -> Source:

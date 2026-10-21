@@ -19,7 +19,6 @@ from xp12dem.sources import SOURCES, Context  # noqa: E402
 
 PROBES = [
     ("gsi", 35, 138, "Mt Fuji ~3776 m"),
-    ("ga", -34, 150, "Blue Mountains ~1100 m"),
     ("linz", -45, 168, "Remarkables ~2300 m"),
     ("hrdem", 51, -116, "Banff area"),
     ("mrdem", 51, -116, "Banff area"),

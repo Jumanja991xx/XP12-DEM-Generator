@@ -7,7 +7,6 @@ and adds the national and regional sources, using their published coverage:
 * Canada       - NRCan HRDEM LiDAR mosaic coverage + MRDEM 30 m
 * Arctic       - ArcticDEM 10 m mosaic tiles (bare areas only: GRL, ISL, >= 67 N)
 * Japan        - GSI 5-10 m elevation tiles
-* Australia    - Geoscience Australia 1" DEM-H as fallback behind FABDEM
 
 Usage:  python packaging/build_coverage.py <download cache dir>
 """
@@ -145,8 +144,6 @@ def main(cache: Path) -> None:
                 chain.insert(chain.index("fabdem"), "arcticdem")
         elif country == "JPN":
             q, chain, fine = "N", ["gsi", "fabdem", "glo30"], True
-        elif country == "AUS":
-            chain = ["fabdem", "ga", "glo30"]
         if q == "F" and lat >= 55 and (country in ("GRL", "ISL", "SJM") or lat >= 67):
             if tile_poly(3413, lat, lon).intersects(arctic):
                 q, chain, fine = "N", ["arcticdem", "fabdem", "glo30"], True

@@ -86,7 +86,6 @@ SOURCE_LABELS = {
     "mrdem": "NRCan MRDEM 30 m (Canada)",
     "arcticdem": "ArcticDEM 10 m",
     "gsi": "GSI 5-10 m (Japan)",
-    "ga": "Geoscience Australia 1\" DEM-H",
 }
 
 

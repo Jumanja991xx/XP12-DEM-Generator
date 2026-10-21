@@ -669,7 +669,7 @@ def reheight_tile(tile: Tile, source: MeshSource, hf: HeightField, out_pack: Pat
     stats = reheight_dsf_text(src_txt, dst_txt, hf, source, out_pack, work, log)
     if stats.heights_range:
         lo, hi = stats.heights_range
-        log(f"   height range widened to {lo:.0f} .. {hi:.0f} m (LiDAR goes beyond the original mesh)")
+        log(f"   storable height range {lo:.0f} .. {hi:.0f} m")
     target = out_pack / dsf_relpath(*tile)
     target.parent.mkdir(parents=True, exist_ok=True)
     log("   writing new DSF")
