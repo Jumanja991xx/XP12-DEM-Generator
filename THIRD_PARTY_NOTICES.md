@@ -29,12 +29,13 @@ Water, coastline, airport and road geometry used while meshing is downloaded
 at run time from the Overpass API. © OpenStreetMap contributors,
 https://www.openstreetmap.org/copyright
 
-## Base map tiles — CARTO / OpenStreetMap
+## Base map tiles — OpenTopoMap / OpenStreetMap
 
-The region map loads "Dark Matter" raster tiles from CARTO
-(https://carto.com/attributions), rendered from OpenStreetMap data.
-© OpenStreetMap contributors © CARTO. Tiles are cached locally and only loaded
-while the map is visible.
+The region map loads raster tiles from OpenTopoMap (https://opentopomap.org,
+map style CC-BY-SA, data © OpenStreetMap contributors, SRTM) and falls back to
+the standard OpenStreetMap tiles (https://tile.openstreetmap.org). Both are
+free and need no API key; the app identifies itself with its User-Agent,
+caches tiles locally for 30 days and only loads what is visible.
 
 ## Natural Earth — public domain
 

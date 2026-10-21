@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +45,17 @@ _IMPROVE_MINUTES = {"1": 2, "3": 2}
 _IMPROVE_MB = 35
 _PACK_MB = {("1", "balanced"): 35, ("1", "high"): 45, ("1", "maximum"): 60,
             ("3", "balanced"): 30, ("3", "high"): 35, ("3", "maximum"): 40}
+
+
+def _duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds} s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes} min {seconds:02d} s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes:02d} min"
 
 
 def _title(text: str) -> QLabel:
@@ -130,6 +142,8 @@ class MainWindow(QMainWindow):
         self.resize(1180, 760)
         self.pipeline: Optional[Pipeline] = None
         self._last_tiles: list = []
+        self._build_t0 = time.monotonic()
+        self._eta: Optional[float] = None
         self.thread: Optional[BuildThread] = None
         self.result: Optional[BuildResult] = None
         self.xplane: Optional[Path] = self._detect_xplane()
@@ -661,7 +675,7 @@ class MainWindow(QMainWindow):
         self.thread.finishedWithResult.connect(self._on_finished)
         self.log_view.clear()
         self.build_map.clear_states()
-        self.progress.setValue(0)
+        self._reset_progress()
         self.create_btn.setEnabled(False)
         self.retry_btn.setVisible(False)
         self.cancel_btn.setEnabled(True)
@@ -694,12 +708,27 @@ class MainWindow(QMainWindow):
 
     @Slot(float, float)
     def _on_progress(self, done: float, total: float) -> None:
-        if total:
-            self.progress.setValue(int(1000 * done / total))
+        if not total:
+            return
+        value = max(self.progress.value(), int(1000 * min(done / total, 1.0)))  # never go back
+        self.progress.setValue(value)
+        fraction = value / 1000
+        elapsed = time.monotonic() - self._build_t0
+        if fraction > 0.02 and elapsed > 5:
+            remaining = elapsed * (1 - fraction) / fraction
+            self._eta = remaining if self._eta is None else 0.8 * self._eta + 0.2 * remaining
+            self.progress.setFormat(f"%p%  ·  ≈ {_duration(self._eta)} left")
+
+    def _reset_progress(self) -> None:
+        self._build_t0 = time.monotonic()
+        self._eta = None
+        self.progress.setValue(0)
+        self.progress.setFormat("%p%")
 
     @Slot(object)
     def _on_finished(self, result: BuildResult) -> None:
         self.result = result
+        self.progress.setFormat(f"%p%  ·  {_duration(result.seconds)} total")
         self.cancel_btn.setEnabled(False)
         self.back_btn.setEnabled(True)
         self.thread = None

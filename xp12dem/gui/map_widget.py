@@ -2,8 +2,9 @@
 
 The map uses the Web Mercator projection so that online map tiles line up:
 
-* an online base map (CARTO "Dark Matter", rendered from OpenStreetMap data,
-  with borders, places and roads) is loaded on demand and cached on disk;
+* an online base map (OpenTopoMap - OpenStreetMap data with borders, places
+  and contour lines; standard OpenStreetMap tiles as fallback; both free and
+  without API key) is loaded on demand and cached on disk;
 * a built-in offline layer (Natural Earth land, country borders and names
   plus a few cities) is always drawn underneath, so the map stays usable
   without internet access.
@@ -13,7 +14,9 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable, Optional
@@ -35,9 +38,14 @@ BASE_ZOOM = 8
 WORLD = 256 * 2 ** BASE_ZOOM
 MIN_TILE_ZOOM, MAX_TILE_ZOOM = 3, 12
 
-TILE_URL = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
-TILE_SUBDOMAINS = "abcd"
-ATTRIBUTION = "© OpenStreetMap contributors © CARTO"
+# Free tile services that need no API key. Both ask for an identifying
+# User-Agent, attribution and local caching, which we do.
+TILE_SOURCES = (
+    ("opentopomap", "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", "abc", 17),
+    ("osm", "https://tile.openstreetmap.org/{z}/{x}/{y}.png", "", 19),
+)
+ATTRIBUTION = "© OpenStreetMap contributors, SRTM | style © OpenTopoMap (CC-BY-SA)"
+CACHE_DAYS = 30
 USER_AGENT = f"XP12-DEM-Generator/{__version__} (+https://github.com/Jumanja991xx/XP12-DEM-Generator)"
 
 COLOR_SEA = QColor("#1b2a38")
@@ -45,10 +53,10 @@ COLOR_LAND = QColor("#2b3d33")
 COLOR_COAST = QColor("#5d7f69")
 COLOR_BORDER = QColor(230, 235, 240, 150)
 COLOR_COUNTRY = QColor(200, 210, 220, 150)
-COLOR_AVAILABLE = QColor(255, 255, 255, 18)
-COLOR_GRID = QColor(255, 255, 255, 55)
-COLOR_SELECTED = QColor(255, 170, 40, 120)
-COLOR_SELECTED_EDGE = QColor(255, 200, 90)
+COLOR_AVAILABLE = QColor(40, 130, 255, 22)
+COLOR_GRID = QColor(70, 110, 160, 130)
+COLOR_SELECTED = QColor(255, 140, 0, 110)
+COLOR_SELECTED_EDGE = QColor(230, 110, 0)
 COLOR_CITY = QColor(235, 240, 245, 210)
 COLOR_STATE = {
     "downloading": QColor(80, 160, 255, 150),
@@ -105,14 +113,18 @@ def scene_to_tile(point: QPointF) -> Tile:
 # Online base map
 # ---------------------------------------------------------------------------
 class TileFetcher(QObject):
-    """Downloads base-map tiles in the background and caches them on disk."""
+    """Downloads base-map tiles in the background and caches them on disk.
+
+    Tries OpenTopoMap first and falls back to the standard OpenStreetMap tiles
+    per tile; only real PNG/JPEG images are accepted and cached.
+    """
 
     loaded = Signal(int, int, int, bytes)
 
     def __init__(self, cache_dir: Path):
         super().__init__()
         self.cache_dir = cache_dir
-        self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="maptiles")
+        self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="maptiles")
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
         self.pending: set[tuple[int, int, int]] = set()
@@ -131,29 +143,47 @@ class TileFetcher(QObject):
             self.pending.add(key)
         self.pool.submit(self._fetch, z, x, y)
 
+    @staticmethod
+    def _is_image(data: bytes) -> bool:
+        return data[:8] == b"\x89PNG\r\n\x1a\n" or data[:3] == b"\xff\xd8\xff"
+
+    def _download(self, z: int, x: int, y: int) -> Optional[bytes]:
+        for _name, url, subdomains, max_zoom in TILE_SOURCES:
+            if z > max_zoom:
+                continue
+            sub = subdomains[(x + y) % len(subdomains)] if subdomains else ""
+            try:
+                response = self.session.get(url.format(s=sub, z=z, x=x, y=y), timeout=10)
+            except requests.RequestException:
+                continue
+            if response.status_code == 200 and self._is_image(response.content):
+                return response.content
+        return None
+
     def _fetch(self, z: int, x: int, y: int) -> None:
         data: Optional[bytes] = None
         cached = self.path(z, x, y)
         try:
-            if cached.is_file():
+            fresh = cached.is_file() and (time.time() - cached.stat().st_mtime) < CACHE_DAYS * 86400
+            if fresh:
                 data = cached.read_bytes()
             elif not self.offline:
-                sub = TILE_SUBDOMAINS[(x + y) % len(TILE_SUBDOMAINS)]
-                response = self.session.get(TILE_URL.format(s=sub, z=z, x=x, y=y), timeout=10)
-                if response.status_code == 200 and response.content[:4] == b"\x89PNG":
-                    data = response.content
+                data = self._download(z, x, y)
+                if data:
                     cached.parent.mkdir(parents=True, exist_ok=True)
                     cached.write_bytes(data)
                     self.failures = 0
                 else:
                     self.failures += 1
-        except (requests.RequestException, OSError):
+                    if cached.is_file():
+                        data = cached.read_bytes()  # stale but better than nothing
+        except OSError:
             self.failures += 1
         if self.failures >= 8:
             self.offline = True  # stop hammering when there is no connection
         with self.lock:
             self.pending.discard((z, x, y))
-        if data:
+        if data and self._is_image(data):
             self.loaded.emit(z, x, y, data)
 
     def shutdown(self) -> None:
@@ -195,7 +225,9 @@ class TileMap(QGraphicsView):
 
         self._fetcher: Optional[TileFetcher] = None
         if online:
-            self._fetcher = TileFetcher(data_root() / "maptiles" / "carto_dark")
+            # tiles from the old CARTO source may be "API key" error images
+            shutil.rmtree(data_root() / "maptiles" / "carto_dark", ignore_errors=True)
+            self._fetcher = TileFetcher(data_root() / "maptiles" / "opentopomap")
             self._fetcher.loaded.connect(self._tile_loaded)
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
@@ -203,7 +235,7 @@ class TileMap(QGraphicsView):
         self._refresh_timer.timeout.connect(self._update_base_map)
         self._attribution = QLabel(ATTRIBUTION if online else "Map: Natural Earth", self)
         self._attribution.setStyleSheet(
-            "background: rgba(14,20,25,180); color: #9fb0c0; font-size: 10px; padding: 2px 6px;")
+            "background: rgba(14,20,25,200); color: #c8d4e0; font-size: 10px; padding: 2px 6px;")
         self._attribution.adjustSize()
 
     # -- construction ---------------------------------------------------

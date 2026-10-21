@@ -62,8 +62,8 @@ very visible.
 2. **XPME / AutoOrtho users:** start XPME or AutoOrtho first, so its scenery folders can be
    read. The app warns you if a pack in `scenery_packs.ini` is empty (= not running).
 3. **Region** — pick a preset (Alps, Swiss Alps, Tyrol, Dolomites, Pyrenees, Norway…) or paint
-   your own 1°×1° tiles on the map (an OpenStreetMap-based map with borders and places; offline a
-   built-in Natural Earth map with country borders is shown).
+   your own 1°×1° tiles on the map (OpenTopoMap / OpenStreetMap with borders, places and contour lines —
+   free, no API key; offline a built-in Natural Earth map with country borders is shown).
 4. **Method & resolution** — keep *Improve my current terrain*, choose 1″ (≈30 m) or 3″ (≈90 m).
 5. **Create** — the summary shows which terrain each tile currently uses; click
    *Create & Install*.
@@ -186,7 +186,7 @@ mesh → masks → DSF.
 * Elevation data © Sonny, https://sonny.4lima.de — CC BY 4.0
 * Ortho4XP © Oscar Pilote and contributors — GPL v3 (vendored in `third_party/Ortho4XP`)
 * DSFTool © Laminar Research (bundled with Ortho4XP)
-* Map data © OpenStreetMap contributors — ODbL; base map tiles © CARTO; offline map: Natural Earth
+* Map data © OpenStreetMap contributors — ODbL; base map © OpenTopoMap (CC-BY-SA); offline map: Natural Earth
 * XP12 DEM Generator source code — MIT (see `LICENSE`). Binary releases bundle Ortho4XP and
   are therefore distributed under the GPL v3. Details in `THIRD_PARTY_NOTICES.md`.
 

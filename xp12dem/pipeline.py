@@ -47,7 +47,15 @@ MESH_DETAILS: tuple[MeshDetail, ...] = (
 WORKER_EXE = "xp12dem-worker"
 
 # Share of a tile's build time already spent when each Ortho4XP step starts.
-STEP_START = {"vector": 0.0, "mesh": 0.12, "masks": 0.45, "dsf": 0.55, "reheight": 0.1}
+STEP_START = {"vector": 0.0, "mesh": 0.12, "masks": 0.45, "dsf": 0.55, "reheight": 0.0}
+# Re-height jobs report these log messages; share of the tile's time already spent.
+LOG_ANCHORS = {"converting DSF to text": 0.02, "applying LiDAR elevations": 0.30,
+               "writing new DSF": 0.75}
+# Progress weights: a DEM download is quick compared with building a tile.
+W_DOWNLOAD, W_BUILD, W_FINAL = 0.12, 1.0, 0.3
+# First guess of seconds per tile until real durations have been measured.
+EXPECTED_SECONDS = {("improve", "1"): 110, ("improve", "3"): 90,
+                    ("rebuild", "1"): 200, ("rebuild", "3"): 150}
 
 
 def mesh_detail(key: str) -> MeshDetail:
@@ -103,6 +111,10 @@ class BuildResult:
     seconds: float = 0.0
 
 
+def code_ok(proc: subprocess.Popen) -> bool:
+    return proc.poll() == 0
+
+
 def worker_command(job_file: Path) -> list[str]:
     """Command line that starts ``o4x_worker`` in a fresh process.
 
@@ -122,7 +134,10 @@ class Pipeline:
         self.cancel_event = threading.Event()
         self._procs: set[subprocess.Popen] = set()
         self._lock = threading.Lock()
-        self._tile_fraction: dict[Tile, float] = {}
+        self._tile_fraction: dict[Tile, float] = {}  # floor from step/log events
+        self._tile_started: dict[Tile, float] = {}
+        self._durations: list[float] = []
+        self._expected = 120.0
         self._on_partial = lambda: None
 
     # ------------------------------------------------------------------
@@ -143,8 +158,9 @@ class Pipeline:
         res = resolution(req.resolution_key)
         detail = mesh_detail(req.mesh_key)
         tiles = list(req.tiles)
-        total_units = len(tiles) * 2 + 1  # download + build per tile, install
+        total_units = len(tiles) * (W_DOWNLOAD + W_BUILD) + W_FINAL
         done_units = 0.0
+        self._expected = float(EXPECTED_SECONDS.get((req.method, req.resolution_key), 120))
 
         def bump(units: float = 1.0) -> None:
             nonlocal done_units
@@ -152,10 +168,16 @@ class Pipeline:
             self.events.progress(done_units, total_units)
 
         def partial() -> None:
-            # finer progress while tiles are being meshed
+            # Running tiles advance with elapsed time against the expected
+            # duration (refined by finished tiles); worker events set floors.
+            now = time.monotonic()
             with self._lock:
-                running = sum(self._tile_fraction.values())
-            self.events.progress(done_units + running, total_units)
+                expected = (sum(self._durations) / len(self._durations)) if self._durations else self._expected
+                running = 0.0
+                for tile, begun in self._tile_started.items():
+                    by_time = min(0.97, (now - begun) / max(expected, 1.0))
+                    running += max(min(self._tile_fraction.get(tile, 0.0), 0.97), by_time)
+            self.events.progress(done_units + running * W_BUILD, total_units)
 
         self._on_partial = partial
 
@@ -175,13 +197,13 @@ class Pipeline:
 
             def on_bytes(done: int, total: int, base=base) -> None:
                 if total:
-                    self.events.progress(base + min(done / total, 1.0) * 0.95, total_units)
+                    self.events.progress(base + min(done / total, 1.0) * 0.95 * W_DOWNLOAD, total_units)
 
             try:
                 dem_files[tile] = store.ensure(tile[0], tile[1], res.arcsec, on_bytes, self.cancel_event)
                 self.events.log(f"DEM {tile_name(*tile)} ready: {dem_files[tile].name}")
                 self.events.tile_state(tile, "dem_ready")
-                bump()
+                bump(W_DOWNLOAD)
             except Cancelled:
                 result.cancelled = True
                 return self._finish(result, started)
@@ -189,7 +211,7 @@ class Pipeline:
                 result.failed_tiles[tile] = str(exc)
                 self.events.log(f"ERROR {tile_name(*tile)}: {exc}")
                 self.events.tile_state(tile, "failed")
-                bump(2)  # its build step will not run either
+                bump(W_DOWNLOAD + W_BUILD)  # its build step will not run either
 
         # 2. Meshes ---------------------------------------------------------
         global_scenery = req.xplane / "Global Scenery" / "X-Plane 12 Global Scenery"
@@ -201,11 +223,11 @@ class Pipeline:
             self.events.stage("Finding the terrain you currently use")
             sources, runways = self._resolve_sources(todo, result, req.pack)
             for tile in [t for t in todo if t not in sources]:
-                bump()  # failed while resolving
+                bump(W_BUILD)  # failed while resolving
             todo = [t for t in todo if t in sources]
             target = self._improve_target(sources, result)
             for tile in [t for t in todo if t not in sources]:
-                bump()  # source lives in a different folder than the others
+                bump(W_BUILD)  # source lives in a different folder than the others
             todo = [t for t in todo if t in sources]
             self.events.stage("Applying LiDAR heights to your terrain")
         else:
@@ -213,6 +235,13 @@ class Pipeline:
             self.events.stage("Building terrain meshes with Ortho4XP")
         selected = set(tiles)
         workers = max(1, min(req.parallel, len(todo) or 1))
+        ticking = threading.Event()
+
+        def ticker() -> None:
+            while not ticking.wait(0.5):
+                partial()
+
+        threading.Thread(target=ticker, daemon=True, name="progress").start()
         with ThreadPoolExecutor(max_workers=workers) as pool:
             if req.method == "improve":
                 futures = {
@@ -238,7 +267,8 @@ class Pipeline:
                     result.failed_tiles[tile] = str(exc)
                     self.events.log(f"ERROR {tile_name(*tile)}: {exc}")
                     self.events.tile_state(tile, "failed")
-                bump()
+                bump(W_BUILD)
+        ticking.set()
         if self.cancel_event.is_set():
             result.cancelled = True
             return self._finish(result, started)
@@ -273,7 +303,7 @@ class Pipeline:
             shutil.rmtree(build_root, ignore_errors=True)
             if req.install:
                 shutil.rmtree(staged, ignore_errors=True)
-        bump()
+        bump(W_FINAL)
         return self._finish(result, started)
 
     # ------------------------------------------------------------------
@@ -420,6 +450,7 @@ class Pipeline:
                                 errors="replace", env=env, creationflags=creationflags)
         with self._lock:
             self._procs.add(proc)
+            self._tile_started[tile] = time.monotonic()
         error: Optional[str] = None
         try:
             with open(log_file, "w", encoding="utf-8") as log:
@@ -442,7 +473,11 @@ class Pipeline:
                     elif kind == "step_done":
                         self.events.log(f"{name}:   done in {event['seconds']} s")
                     elif kind == "log":
-                        self.events.log(f"{name}:   {event.get('message', '')}")
+                        message = event.get("message", "")
+                        self.events.log(f"{name}:   {message}")
+                        if message in LOG_ANCHORS:
+                            with self._lock:
+                                self._tile_fraction[tile] = LOG_ANCHORS[message]
                     elif kind == "warning":
                         self.events.log(f"{name}: warning - {event.get('message', '')}")
                     elif kind == "error":
@@ -452,6 +487,9 @@ class Pipeline:
             with self._lock:
                 self._procs.discard(proc)
                 self._tile_fraction.pop(tile, None)
+                begun = self._tile_started.pop(tile, None)
+                if begun is not None and code_ok(proc):
+                    self._durations.append(time.monotonic() - begun)
         if self.cancel_event.is_set():
             raise Cancelled()
         if code != 0 or error:
