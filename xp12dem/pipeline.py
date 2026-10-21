@@ -203,8 +203,13 @@ class Pipeline:
             for tile in [t for t in todo if t not in sources]:
                 bump()  # failed while resolving
             todo = [t for t in todo if t in sources]
+            target = self._improve_target(sources, result)
+            for tile in [t for t in todo if t not in sources]:
+                bump()  # source lives in a different folder than the others
+            todo = [t for t in todo if t in sources]
             self.events.stage("Applying LiDAR heights to your terrain")
         else:
+            target = req.target
             self.events.stage("Building terrain meshes with Ortho4XP")
         selected = set(tiles)
         workers = max(1, min(req.parallel, len(todo) or 1))
@@ -259,7 +264,7 @@ class Pipeline:
 
                 above |= {p for p in enabled_packs(req.xplane / "Custom Scenery")
                           if p.lower().startswith(IMPROVE_PREFIX) and p != req.pack}
-            result.installed_to = install_pack(staged, req.target, req.pack, above)
+            result.installed_to = install_pack(staged, target, req.pack, above)
             self.events.log(f"Installed {req.pack} -> {result.installed_to}")
             self.events.log("scenery_packs.ini updated (backup: scenery_packs.ini.xp12dem.bak)")
         else:
@@ -339,6 +344,38 @@ class Pipeline:
         count = sum(len(v) for v in runways.values())
         self.events.log(f"{count} runway(s) found - their surroundings keep the original heights")
         return sources, runways
+
+    def _improve_target(self, sources: dict, result: BuildResult) -> InstallTarget:
+        """Where the improved pack must live so its texture paths reach the sources.
+
+        .ter files point to ``../../<source pack>/textures``, so the new pack has
+        to sit in the same folder as the packs it improves - normally Custom
+        Scenery, but XPME may keep its packages elsewhere (absolute paths in
+        scenery_packs.ini).
+        """
+        custom = self.req.xplane / "Custom Scenery"
+        by_parent: dict[Path, list[Tile]] = {}
+        for tile, src in sources.items():
+            if src.kind == "pack" and src.pack_root is not None:
+                by_parent.setdefault(src.pack_root.parent, []).append(tile)
+        if not by_parent:
+            return InstallTarget.for_custom_scenery(self.req.xplane)
+        parent = max(by_parent, key=lambda p: (len(by_parent[p]), p == custom))
+        for other, tiles in by_parent.items():
+            if other == parent:
+                continue
+            for tile in tiles:
+                message = (f"its terrain ({sources[tile].name}) is stored in {other}, the other "
+                           f"tiles' terrain in {parent} - build this tile in a separate run")
+                result.failed_tiles[tile] = message
+                self.events.log(f"ERROR {tile_name(*tile)}: {message}")
+                self.events.tile_state(tile, "failed")
+                del sources[tile]
+        if parent == custom:
+            return InstallTarget.for_custom_scenery(self.req.xplane)
+        self.events.log(f"Your terrain is stored outside X-Plane ({parent}); the new pack is "
+                        "placed next to it and registered with its full path.")
+        return InstallTarget.beside(parent, self.req.xplane)
 
     def _improve_tile(self, tile: Tile, dem_file: Path, build_root: Path, source,
                       runways: list, selected: set[Tile]) -> Path:

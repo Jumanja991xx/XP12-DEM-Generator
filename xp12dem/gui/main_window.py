@@ -129,6 +129,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.resize(1180, 760)
         self.pipeline: Optional[Pipeline] = None
+        self._last_tiles: list = []
         self.thread: Optional[BuildThread] = None
         self.result: Optional[BuildResult] = None
         self.xplane: Optional[Path] = self._detect_xplane()
@@ -454,10 +455,16 @@ class MainWindow(QMainWindow):
         self.create_btn.setObjectName("primary")
         self.create_btn.setMinimumHeight(40)
         self.create_btn.clicked.connect(self._start_build)
+        self.retry_btn = QPushButton("Retry failed tiles")
+        self.retry_btn.setObjectName("primary")
+        self.retry_btn.setMinimumHeight(40)
+        self.retry_btn.setVisible(False)
+        self.retry_btn.clicked.connect(self._retry_failed)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self._cancel_build)
         controls.addWidget(self.create_btn)
+        controls.addWidget(self.retry_btn)
         controls.addWidget(self.cancel_btn)
         self.stage_label = QLabel("Ready.")
         self.stage_label.setObjectName("stage")
@@ -607,11 +614,26 @@ class MainWindow(QMainWindow):
         return text
 
     # -- build control --------------------------------------------------
-    def _start_build(self) -> None:
+    def _failed_to_retry(self) -> list:
+        if not self.result or not self.result.failed_tiles:
+            return []
+        failed = [t for t in self.result.failed_tiles if t != (0, 0)]
+        if (0, 0) in self.result.failed_tiles and self._last_tiles:
+            return list(self._last_tiles)  # the whole run crashed
+        return sorted(failed)
+
+    def _retry_failed(self) -> None:
+        tiles = self._failed_to_retry()
+        if tiles:
+            self._go(2)
+            self._start_build(tiles, retry=True)
+
+    def _start_build(self, tiles=None, retry: bool = False) -> None:
         target = self._target()
         if target is None or self.xplane is None:
             return
-        tiles = self.map.selected()
+        tiles = list(tiles) if tiles else self.map.selected()
+        self._last_tiles = list(tiles)
         name = self.name_edit.text().strip() or "My region"
         self._save_choices()
         request = BuildRequest(
@@ -622,7 +644,7 @@ class MainWindow(QMainWindow):
             parallel=self.parallel_spin.value(), method=self._method_key(),
             extra_roots=self._extra_roots())
         existing = target.pack_dir(request.pack)
-        if existing.exists():
+        if existing.exists() and not retry:
             answer = QMessageBox.question(
                 self, APP_NAME, f"'{request.pack}' already exists. Rebuilt tiles will replace "
                 "the old ones and new tiles are added. Continue?")
@@ -641,8 +663,12 @@ class MainWindow(QMainWindow):
         self.build_map.clear_states()
         self.progress.setValue(0)
         self.create_btn.setEnabled(False)
+        self.retry_btn.setVisible(False)
         self.cancel_btn.setEnabled(True)
         self.back_btn.setEnabled(False)
+        if retry:
+            self._append_log(f"Retrying {len(tiles)} tile(s): "
+                             + ", ".join(regions.tile_name(*t) for t in tiles))
         self._append_log(f"Building {len(tiles)} tile(s) into {request.pack}")
         self._append_log(ATTRIBUTION)
         self.thread.start()
@@ -682,10 +708,11 @@ class MainWindow(QMainWindow):
             self._refresh_summary()
             return
         if not result.ok_tiles:
-            self.stage_label.setText("Build failed - see log.")
+            self.stage_label.setText("Build failed - fix the cause (see log) and click Retry.")
             for tile, message in result.failed_tiles.items():
                 self._append_log(f"FAILED {regions.tile_name(*tile)}: {message}")
             self._refresh_summary()
+            self.retry_btn.setVisible(bool(self._failed_to_retry()))
             return
         self.progress.setValue(1000)
         self.stage_label.setText("Finished.")
@@ -706,10 +733,13 @@ class MainWindow(QMainWindow):
         buttons = QHBoxLayout()
         open_btn = QPushButton("Open pack folder")
         open_btn.clicked.connect(self._open_pack)
+        self.done_retry_btn = QPushButton("Retry failed tiles")
+        self.done_retry_btn.clicked.connect(self._retry_failed)
         again = QPushButton("Build another region")
         again.setObjectName("primary")
         again.clicked.connect(lambda: self._go(0))
         buttons.addWidget(open_btn)
+        buttons.addWidget(self.done_retry_btn)
         buttons.addStretch(1)
         buttons.addWidget(again)
         layout.addLayout(buttons)
@@ -717,6 +747,7 @@ class MainWindow(QMainWindow):
         return page
 
     def _show_done(self, result: BuildResult) -> None:
+        self.done_retry_btn.setVisible(bool(self._failed_to_retry()))
         improve = self._method_key() == "improve"
         ao_mode = self.target_ao.isChecked() and not improve
         failed = ""

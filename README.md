@@ -54,23 +54,31 @@ very visible.
 
 ## Quick start (Windows 10/11)
 
-1. Download `XP12DEMGenerator-windows.zip` from the
-   [latest release](../../releases/latest) (or from the newest successful
-   [build run](../../actions) → *Artifacts*), unzip it anywhere and start
-   **`XP12DEMGenerator.exe`**.
+1. Download **`XP12DEMGenerator-Setup.exe`** from the [latest release](../../releases/latest)
+   (or from the newest successful [build run](../../actions) → *Artifacts*) and run it. It installs
+   per user (no administrator rights), adds a Start-menu entry and an uninstaller. Windows
+   SmartScreen may warn because the installer is not code-signed: *More info → Run anyway*.
+   A portable ZIP (`XP12DEMGenerator-windows.zip`) is available as well.
 2. **XPME / AutoOrtho users:** start XPME or AutoOrtho first, so its scenery folders can be
    read. The app warns you if a pack in `scenery_packs.ini` is empty (= not running).
 3. **Region** — pick a preset (Alps, Swiss Alps, Tyrol, Dolomites, Pyrenees, Norway…) or paint
-   your own 1°×1° tiles on the map.
+   your own 1°×1° tiles on the map (an OpenStreetMap-based map with borders and places; offline a
+   built-in Natural Earth map with country borders is shown).
 4. **Method & resolution** — keep *Improve my current terrain*, choose 1″ (≈30 m) or 3″ (≈90 m).
 5. **Create** — the summary shows which terrain each tile currently uses; click
    *Create & Install*.
-6. Start X-Plane 12 (with XPME/AutoOrtho as usual) and fly.
+6. If something fails (e.g. XPME was not running), fix the cause and click **Retry failed tiles** —
+   only the failed tiles are built again.
+7. Start X-Plane 12 (with XPME/AutoOrtho as usual) and fly. The new terrain is stored locally;
+   the app does not need to run while flying.
 
 ## Notes for XPME users
 
 * XPME's base packages are Ortho4XP-style meshes served through its own virtual drive. The
   improved pack re-uses XPME's textures, so **XPME must stay installed and running**.
+* If XPME keeps its packages outside X-Plane (absolute paths such as `D:/XPME/XPME_Europe/` in
+  `scenery_packs.ini`), the improved pack is created **in the same folder** and registered with
+  its full path, so the texture references keep working.
 * XPME can re-order `scenery_packs.ini` when it starts. The `z_dem_…` pack must stay **above**
   the XPME packages; if XPME moves it, disable XPME's automatic ordering or move the line up.
 * After XPME updates its base packages, or after you flatten an airport in XPME, build the
@@ -131,6 +139,7 @@ pip install -r requirements-dev.txt
 python -m xp12dem                # start the GUI
 python -m pytest                 # run the tests
 pyinstaller --noconfirm packaging/xp12dem.spec   # -> dist/XP12DEMGenerator/
+iscc /DMyAppVersion=0.1.0 packaging/installer.iss  # -> dist/XP12DEMGenerator-Setup-0.1.0.exe
 ```
 
 The app also runs on Linux (Ortho4XP's Linux binaries are included). Every push builds
@@ -151,7 +160,9 @@ xp12dem/
 third_party/Ortho4XP   unmodified Ortho4XP sources + Triangle4XP / DSFTool / 7-Zip
 ```
 
-Each tile is processed by a separate `xp12dem-worker` process. In *new mesh* mode it configures Ortho4XP
+`xp12dem-worker.exe` is an internal helper that the app starts itself — never run it manually.
+Each tile is processed by a separate `xp12dem-worker` process, which keeps the window responsive,
+lets several tiles run in parallel and isolates memory use and crashes of the heavy mesh tools. In *new mesh* mode it configures Ortho4XP
 (Sonny DEM as `custom_dem`, imagery download disabled, XP12 water, masks as separate
 PNGs for AutoOrtho), then runs Ortho4XP's normal steps: vector data → Triangle4XP
 mesh → masks → DSF.
@@ -175,7 +186,7 @@ mesh → masks → DSF.
 * Elevation data © Sonny, https://sonny.4lima.de — CC BY 4.0
 * Ortho4XP © Oscar Pilote and contributors — GPL v3 (vendored in `third_party/Ortho4XP`)
 * DSFTool © Laminar Research (bundled with Ortho4XP)
-* Map data © OpenStreetMap contributors — ODbL; map background: Natural Earth
+* Map data © OpenStreetMap contributors — ODbL; base map tiles © CARTO; offline map: Natural Earth
 * XP12 DEM Generator source code — MIT (see `LICENSE`). Binary releases bundle Ortho4XP and
   are therefore distributed under the GPL v3. Details in `THIRD_PARTY_NOTICES.md`.
 

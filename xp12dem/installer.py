@@ -46,8 +46,19 @@ class InstallTarget:
     def for_custom_scenery(cls, xplane: Path) -> "InstallTarget":
         return cls("custom_scenery", xplane / "Custom Scenery", xplane / "Custom Scenery")
 
+    @classmethod
+    def beside(cls, parent: Path, xplane: Path) -> "InstallTarget":
+        """Next to packs stored outside X-Plane (absolute scenery_packs.ini entries)."""
+        return cls("external", parent, xplane / "Custom Scenery")
+
     def pack_dir(self, name: str) -> Path:
         return self.pack_parent / name
+
+    def ini_entry(self, name: str) -> Optional[str]:
+        """Path to write into scenery_packs.ini (None = default 'Custom Scenery/<name>/')."""
+        if self.kind == "external":
+            return f"{self.pack_parent.as_posix().rstrip('/')}/{name}/"
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +159,7 @@ def install_pack(staged_pack: Path, target: InstallTarget, name: str,
     dest = target.pack_dir(name)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(staged_pack, dest, dirs_exist_ok=True)
-    update_scenery_packs_ini(target.custom_scenery, name, above)
+    update_scenery_packs_ini(target.custom_scenery, name, above, target.ini_entry(name))
     return dest
 
 
@@ -169,7 +180,8 @@ def _pack_of(line: str) -> Optional[str]:
     return None
 
 
-def insert_pack_line(lines: list[str], name: str, above: Iterable[str] = ()) -> list[str]:
+def insert_pack_line(lines: list[str], name: str, above: Iterable[str] = (),
+                     entry_path: Optional[str] = None) -> list[str]:
     """Return ``lines`` with ``name`` enabled directly above the first mesh pack.
 
     X-Plane uses only the first base mesh it finds for each tile, in
@@ -177,7 +189,7 @@ def insert_pack_line(lines: list[str], name: str, above: Iterable[str] = ()) -> 
     replaces: the ``above`` packs (e.g. the XPME package we re-heighted), or
     AutoOrtho's own packs (``z_ao_*``) and any other Ortho4XP mesh.
     """
-    entry = f"SCENERY_PACK Custom Scenery/{name}/"
+    entry = f"SCENERY_PACK {entry_path or f'Custom Scenery/{name}/'}"
     kept = [line for line in lines if _pack_of(line) != name]
     above = {a.lower() for a in above}
     insert_at = None
@@ -212,9 +224,10 @@ def _write_ini(custom_scenery: Path, lines: list[str], newline: str) -> None:
     tmp.replace(ini)
 
 
-def update_scenery_packs_ini(custom_scenery: Path, name: str, above: Iterable[str] = ()) -> None:
+def update_scenery_packs_ini(custom_scenery: Path, name: str, above: Iterable[str] = (),
+                             entry_path: Optional[str] = None) -> None:
     lines, newline = _read_ini(custom_scenery)
-    _write_ini(custom_scenery, insert_pack_line(lines, name, above), newline)
+    _write_ini(custom_scenery, insert_pack_line(lines, name, above, entry_path), newline)
 
 
 def remove_from_scenery_packs_ini(custom_scenery: Path, name: str) -> None:

@@ -148,3 +148,37 @@ def test_find_source_never_chains_improved_packs(tmp_path):
     (xp / "Custom Scenery" / "my_lidar" / "xp12dem_pack.json").write_text('{"method": "improve"}')
     _write_dsf(xp / "Custom Scenery" / "XPME_Europe" / rel, {})
     assert RH.find_mesh_source((47, 11), xp).name == "XPME_Europe"
+
+
+def test_absolute_pack_paths_outside_xplane(tmp_path):
+    xp = _xplane(tmp_path, [])
+    external = tmp_path / "XPME Data" / "scenery"
+    _write_dsf(external / "XPME_Europe" / "Earth nav data/+40+010/+47+011.dsf", {})
+    (external / "XPME_Africa").mkdir(parents=True)
+    ini = xp / "Custom Scenery" / "scenery_packs.ini"
+    ini.write_text(ini.read_text()
+                   + f"SCENERY_PACK {external.as_posix()}/XPME_Africa/\n"
+                   + f"SCENERY_PACK {str(external / 'XPME_Europe')}\\\n")
+    entries = RH.pack_entries(xp / "Custom Scenery")
+    assert [name for name, _ in entries] == ["XPME_Africa", "XPME_Europe"]
+    src = RH.find_mesh_source((47, 11), xp)
+    assert src.name == "XPME_Europe" and src.pack_root == external / "XPME_Europe"
+    assert src.unreadable_above == ["XPME_Africa"]
+
+
+def test_unavailable_error_lists_checked_paths(tmp_path):
+    xp = _xplane(tmp_path, ["XPME_Europe"])
+    with pytest.raises(RH.SourceUnavailable) as err:
+        RH.find_mesh_source((47, 11), xp)
+    assert "Checked:" in str(err.value) and "XPME_Europe" in str(err.value)
+
+
+def test_external_install_target_writes_absolute_entry(tmp_path):
+    xp = tmp_path / "X-Plane 12"
+    (xp / "Custom Scenery").mkdir(parents=True)
+    parent = tmp_path / "XPME Data"
+    target = installer.InstallTarget.beside(parent, xp)
+    assert target.ini_entry("z_dem_x") == f"{parent.as_posix()}/z_dem_x/"
+    lines = ["I", "1000 Version", "SCENERY", "", f"SCENERY_PACK {parent.as_posix()}/XPME_Europe/"]
+    out = installer.insert_pack_line(lines, "z_dem_x", {"XPME_Europe"}, target.ini_entry("z_dem_x"))
+    assert out[4] == f"SCENERY_PACK {parent.as_posix()}/z_dem_x/"

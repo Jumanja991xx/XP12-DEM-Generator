@@ -1,32 +1,64 @@
-"""Interactive Europe map for picking 1x1 degree tiles."""
+"""Interactive Europe map for picking 1x1 degree tiles.
+
+The map uses the Web Mercator projection so that online map tiles line up:
+
+* an online base map (CARTO "Dark Matter", rendered from OpenStreetMap data,
+  with borders, places and roads) is loaded on demand and cached on disk;
+* a built-in offline layer (Natural Earth land, country borders and names
+  plus a few cities) is always drawn underneath, so the map stays usable
+  without internet access.
+"""
 
 from __future__ import annotations
 
 import json
 import math
-from typing import Iterable
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Iterable, Optional
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
-from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView
+import requests
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtWidgets import (
+    QGraphicsItem, QGraphicsPixmapItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
+    QLabel,
+)
 
-from ..paths import resources_dir
+from .. import __version__
+from ..paths import data_root, resources_dir
 from ..regions import Tile, available_tiles, tile_name
 
-# Equirectangular projection, x stretched by cos(52°) so Europe looks right.
-_KX = math.cos(math.radians(52)) * 20.0
-_KY = 20.0
+# Scene coordinates are Web Mercator pixels at zoom BASE_ZOOM.
+BASE_ZOOM = 8
+WORLD = 256 * 2 ** BASE_ZOOM
+MIN_TILE_ZOOM, MAX_TILE_ZOOM = 3, 12
+
+TILE_URL = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
+TILE_SUBDOMAINS = "abcd"
+ATTRIBUTION = "© OpenStreetMap contributors © CARTO"
+USER_AGENT = f"XP12-DEM-Generator/{__version__} (+https://github.com/Jumanja991xx/XP12-DEM-Generator)"
 
 COLOR_SEA = QColor("#1b2a38")
-COLOR_LAND = QColor("#2f4a3a")
+COLOR_LAND = QColor("#2b3d33")
 COLOR_COAST = QColor("#5d7f69")
-COLOR_AVAILABLE = QColor(255, 255, 255, 28)
-COLOR_GRID = QColor(255, 255, 255, 45)
-COLOR_SELECTED = QColor(255, 170, 40, 150)
+COLOR_BORDER = QColor(230, 235, 240, 150)
+COLOR_COUNTRY = QColor(200, 210, 220, 150)
+COLOR_AVAILABLE = QColor(255, 255, 255, 18)
+COLOR_GRID = QColor(255, 255, 255, 55)
+COLOR_SELECTED = QColor(255, 170, 40, 120)
 COLOR_SELECTED_EDGE = QColor(255, 200, 90)
 COLOR_CITY = QColor(235, 240, 245, 210)
+COLOR_STATE = {
+    "downloading": QColor(80, 160, 255, 150),
+    "dem_ready": QColor(80, 160, 255, 150),
+    "building": QColor(170, 120, 255, 170),
+    "built": QColor(60, 200, 110, 170),
+    "failed": QColor(230, 70, 70, 190),
+}
 
-# A few reference points to find your way around the map.
+# A few reference points for the offline map (the online map has its own labels).
 CITIES = (
     ("Innsbruck", 47.27, 11.39), ("Munich", 48.14, 11.58), ("Zurich", 47.38, 8.54),
     ("Geneva", 46.20, 6.14), ("Vienna", 48.21, 16.37), ("Milan", 45.46, 9.19),
@@ -41,38 +73,107 @@ CITIES = (
     ("Budapest", 47.50, 19.04), ("Zagreb", 45.81, 15.98), ("Reykjavík", 64.15, -21.94),
 )
 
-COLOR_STATE = {
-    "downloading": QColor(80, 160, 255, 160),
-    "dem_ready": QColor(80, 160, 255, 160),
-    "building": QColor(170, 120, 255, 180),
-    "built": QColor(60, 200, 110, 190),
-    "failed": QColor(230, 70, 70, 200),
-}
 
-
+# ---------------------------------------------------------------------------
+# Projection
+# ---------------------------------------------------------------------------
 def to_scene(lon: float, lat: float) -> QPointF:
-    return QPointF(lon * _KX, -lat * _KY)
+    lat = max(min(lat, 85.0), -85.0)
+    x = (lon + 180.0) / 360.0 * WORLD
+    s = math.sin(math.radians(lat))
+    y = (0.5 - math.log((1 + s) / (1 - s)) / (4 * math.pi)) * WORLD
+    return QPointF(x, y)
+
+
+def from_scene(point: QPointF) -> tuple[float, float]:
+    lon = point.x() / WORLD * 360.0 - 180.0
+    n = math.pi - 2 * math.pi * point.y() / WORLD
+    lat = math.degrees(math.atan(math.sinh(n)))
+    return lon, lat
 
 
 def tile_rect(lat: int, lon: int) -> QRectF:
-    top_left = to_scene(lon, lat + 1)
-    bottom_right = to_scene(lon + 1, lat)
-    return QRectF(top_left, bottom_right)
+    return QRectF(to_scene(lon, lat + 1), to_scene(lon + 1, lat))
 
 
 def scene_to_tile(point: QPointF) -> Tile:
-    return math.floor(-point.y() / _KY), math.floor(point.x() / _KX)
+    lon, lat = from_scene(point)
+    return math.floor(lat), math.floor(lon)
 
 
+# ---------------------------------------------------------------------------
+# Online base map
+# ---------------------------------------------------------------------------
+class TileFetcher(QObject):
+    """Downloads base-map tiles in the background and caches them on disk."""
+
+    loaded = Signal(int, int, int, bytes)
+
+    def __init__(self, cache_dir: Path):
+        super().__init__()
+        self.cache_dir = cache_dir
+        self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="maptiles")
+        self.session = requests.Session()
+        self.session.headers["User-Agent"] = USER_AGENT
+        self.pending: set[tuple[int, int, int]] = set()
+        self.lock = threading.Lock()
+        self.failures = 0
+        self.offline = False
+
+    def path(self, z: int, x: int, y: int) -> Path:
+        return self.cache_dir / str(z) / str(x) / f"{y}.png"
+
+    def request(self, z: int, x: int, y: int) -> None:
+        key = (z, x, y)
+        with self.lock:
+            if key in self.pending:
+                return
+            self.pending.add(key)
+        self.pool.submit(self._fetch, z, x, y)
+
+    def _fetch(self, z: int, x: int, y: int) -> None:
+        data: Optional[bytes] = None
+        cached = self.path(z, x, y)
+        try:
+            if cached.is_file():
+                data = cached.read_bytes()
+            elif not self.offline:
+                sub = TILE_SUBDOMAINS[(x + y) % len(TILE_SUBDOMAINS)]
+                response = self.session.get(TILE_URL.format(s=sub, z=z, x=x, y=y), timeout=10)
+                if response.status_code == 200 and response.content[:4] == b"\x89PNG":
+                    data = response.content
+                    cached.parent.mkdir(parents=True, exist_ok=True)
+                    cached.write_bytes(data)
+                    self.failures = 0
+                else:
+                    self.failures += 1
+        except (requests.RequestException, OSError):
+            self.failures += 1
+        if self.failures >= 8:
+            self.offline = True  # stop hammering when there is no connection
+        with self.lock:
+            self.pending.discard((z, x, y))
+        if data:
+            self.loaded.emit(z, x, y, data)
+
+    def shutdown(self) -> None:
+        self.pool.shutdown(wait=False, cancel_futures=True)
+
+
+# ---------------------------------------------------------------------------
+# Map view
+# ---------------------------------------------------------------------------
 class TileMap(QGraphicsView):
-    """Left click/drag selects tiles, right click/drag deselects, wheel zooms."""
+    """Left click/drag selects tiles, right click/drag deselects, wheel zooms,
+    middle drag pans."""
 
     selectionChanged = Signal()
     hovered = Signal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, online: bool = True):
         super().__init__(parent)
         self.setRenderHint(QPainter.Antialiasing)
+        self.setRenderHint(QPainter.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.NoDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -85,40 +186,145 @@ class TileMap(QGraphicsView):
         self._available = available_tiles()
         self._selected: set[Tile] = set()
         self._states: dict[Tile, str] = {}
-        self._tile_items: dict[Tile, object] = {}
-        self._paint_mode: bool | None = None
+        self._tile_items: dict[Tile, QGraphicsItem] = {}
+        self._base_items: dict[tuple[int, int, int], QGraphicsPixmapItem] = {}
+        self._paint_mode: Optional[bool] = None
         self._editable = True
         self._pan_start = None
         self._build_static()
 
+        self._fetcher: Optional[TileFetcher] = None
+        if online:
+            self._fetcher = TileFetcher(data_root() / "maptiles" / "carto_dark")
+            self._fetcher.loaded.connect(self._tile_loaded)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(120)
+        self._refresh_timer.timeout.connect(self._update_base_map)
+        self._attribution = QLabel(ATTRIBUTION if online else "Map: Natural Earth", self)
+        self._attribution.setStyleSheet(
+            "background: rgba(14,20,25,180); color: #9fb0c0; font-size: 10px; padding: 2px 6px;")
+        self._attribution.adjustSize()
+
     # -- construction ---------------------------------------------------
     def _build_static(self) -> None:
-        data = json.loads((resources_dir() / "europe_land.json").read_text(encoding="utf-8"))
+        land_data = json.loads((resources_dir() / "europe_land.json").read_text(encoding="utf-8"))
         land = QPainterPath()
-        for ring in data["polygons"]:
+        for ring in land_data["polygons"]:
             land.addPolygon(QPolygonF([to_scene(x, y) for x, y in ring]))
             land.closeSubpath()
-        land_item = self._scene.addPath(land, QPen(COLOR_COAST, 0), QBrush(COLOR_LAND))
-        land_item.setZValue(0)
-        pen = QPen(COLOR_GRID, 0)
-        for lat, lon in self._available:
-            item = self._scene.addRect(tile_rect(lat, lon), pen, QBrush(COLOR_AVAILABLE))
-            item.setZValue(1)
-        font = QFont()
-        font.setPointSize(8)
+        item = self._scene.addPath(land, QPen(COLOR_COAST, 0), QBrush(COLOR_LAND))
+        item.setZValue(0)
+
+        borders = json.loads((resources_dir() / "europe_borders.json").read_text(encoding="utf-8"))
+        path = QPainterPath()
+        for line in borders["lines"]:
+            path.moveTo(to_scene(*line[0]))
+            for x, y in line[1:]:
+                path.lineTo(to_scene(x, y))
+        pen = QPen(COLOR_BORDER, 1.2)
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.DashLine)
+        item = self._scene.addPath(path, pen)
+        item.setZValue(0.5)
+
+        country_font = QFont()
+        country_font.setPointSize(9)
+        country_font.setLetterSpacing(QFont.PercentageSpacing, 110)
+        for name, lon, lat, rank in borders["labels"]:
+            if rank > 5:
+                continue
+            label = QGraphicsSimpleTextItem(name.upper())
+            label.setFont(country_font)
+            label.setBrush(QBrush(COLOR_COUNTRY))
+            label.setPos(to_scene(lon, lat))
+            label.setFlag(QGraphicsItem.ItemIgnoresTransformations)
+            label.setZValue(0.6)
+            self._scene.addItem(label)
+
+        city_font = QFont()
+        city_font.setPointSize(8)
         for name, lat, lon in CITIES:
             dot = self._scene.addEllipse(-2, -2, 4, 4, QPen(Qt.NoPen), QBrush(COLOR_CITY))
             dot.setPos(to_scene(lon, lat))
             dot.setFlag(QGraphicsItem.ItemIgnoresTransformations)
-            dot.setZValue(3)
+            dot.setZValue(0.7)
             label = QGraphicsSimpleTextItem(name)
-            label.setFont(font)
+            label.setFont(city_font)
             label.setBrush(QBrush(COLOR_CITY))
             label.setPos(to_scene(lon, lat))
             label.setFlag(QGraphicsItem.ItemIgnoresTransformations)
-            label.setZValue(3)
+            label.setZValue(0.7)
             self._scene.addItem(label)
-        self._scene.setSceneRect(QRectF(to_scene(-26, 73), to_scene(46, 33)))
+
+        grid_pen = QPen(COLOR_GRID, 1)
+        grid_pen.setCosmetic(True)
+        for lat, lon in self._available:
+            item = self._scene.addRect(tile_rect(lat, lon), grid_pen, QBrush(COLOR_AVAILABLE))
+            item.setZValue(2)
+        self._scene.setSceneRect(QRectF(to_scene(-35, 75), to_scene(50, 25)))
+
+    # -- online base map ------------------------------------------------
+    def _zoom_level(self) -> int:
+        scale = self.transform().m11() or 1.0
+        z = BASE_ZOOM + math.log2(scale)
+        return int(max(MIN_TILE_ZOOM, min(MAX_TILE_ZOOM, math.ceil(z - 0.3))))
+
+    def _update_base_map(self) -> None:
+        if self._fetcher is None:
+            return
+        z = self._zoom_level()
+        size = WORLD / 2 ** z  # scene size of one map tile at zoom z
+        view = self.mapToScene(self.viewport().rect()).boundingRect()
+        x0, x1 = int(view.left() // size), int(view.right() // size)
+        y0, y1 = int(view.top() // size), int(view.bottom() // size)
+        n = 2 ** z
+        wanted = set()
+        for x in range(max(0, x0), min(n - 1, x1) + 1):
+            for y in range(max(0, y0), min(n - 1, y1) + 1):
+                wanted.add((z, x, y))
+                if (z, x, y) not in self._base_items:
+                    self._fetcher.request(z, x, y)
+        # forget tiles of other zoom levels far away to keep memory in check
+        if len(self._base_items) > 400:
+            for key in [k for k in self._base_items if k[0] != z and k not in wanted]:
+                self._scene.removeItem(self._base_items.pop(key))
+
+    def _tile_loaded(self, z: int, x: int, y: int, data: bytes) -> None:
+        if (z, x, y) in self._base_items:
+            return
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            return
+        item = QGraphicsPixmapItem(pixmap)
+        item.setTransformationMode(Qt.SmoothTransformation)
+        scale = WORLD / 2 ** z / pixmap.width()
+        item.setScale(scale)
+        item.setPos(x * WORLD / 2 ** z, y * WORLD / 2 ** z)
+        item.setZValue(1 + z / 100.0)  # finer zoom levels on top
+        self._scene.addItem(item)  # covers the offline layer (z < 1) where available
+        self._base_items[(z, x, y)] = item
+
+    def _schedule_base_map(self) -> None:
+        if getattr(self, "_fetcher", None) is not None:
+            self._refresh_timer.start()
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        if not hasattr(self, "_attribution"):
+            return
+        self._attribution.move(self.viewport().width() - self._attribution.width() - 4,
+                               self.viewport().height() - self._attribution.height() - 4)
+        self._schedule_base_map()
+
+    def scrollContentsBy(self, dx, dy):  # noqa: N802 - Qt API
+        super().scrollContentsBy(dx, dy)
+        self._schedule_base_map()
+
+    def closeEvent(self, event):  # noqa: N802
+        if self._fetcher is not None:
+            self._fetcher.shutdown()
+        super().closeEvent(event)
 
     # -- public API -----------------------------------------------------
     def selected(self) -> list[Tile]:
@@ -131,7 +337,7 @@ class TileMap(QGraphicsView):
             self.focus_tiles(self._selected)
         self.selectionChanged.emit()
 
-    def set_tile_state(self, tile: Tile, state: str | None) -> None:
+    def set_tile_state(self, tile: Tile, state: Optional[str]) -> None:
         if state is None:
             self._states.pop(tile, None)
         else:
@@ -152,11 +358,13 @@ class TileMap(QGraphicsView):
         rect = QRectF()
         for lat, lon in tiles:
             rect = rect.united(tile_rect(lat, lon))
-        margin = max(rect.width(), rect.height()) * 0.8 + 40
+        margin = max(rect.width(), rect.height()) * 0.8 + 20
         self.fitInView(rect.adjusted(-margin, -margin, margin, margin), Qt.KeepAspectRatio)
+        self._schedule_base_map()
 
     def show_all(self) -> None:
         self.fitInView(QRectF(to_scene(-12, 66), to_scene(32, 36)), Qt.KeepAspectRatio)
+        self._schedule_base_map()
 
     # -- drawing --------------------------------------------------------
     def _refresh(self) -> None:
@@ -164,21 +372,26 @@ class TileMap(QGraphicsView):
         for tile in list(self._tile_items):
             if tile not in wanted:
                 self._scene.removeItem(self._tile_items.pop(tile))
+        edge = QPen(COLOR_SELECTED_EDGE, 1.5)
+        edge.setCosmetic(True)
         for tile in wanted:
             state = self._states.get(tile)
             fill = COLOR_STATE.get(state, COLOR_SELECTED) if state else COLOR_SELECTED
             item = self._tile_items.get(tile)
             if item is None:
-                item = self._scene.addRect(tile_rect(*tile), QPen(COLOR_SELECTED_EDGE, 0), QBrush(fill))
-                item.setZValue(2)
+                item = self._scene.addRect(tile_rect(*tile), edge, QBrush(fill))
+                item.setZValue(3)
                 self._tile_items[tile] = item
             else:
                 item.setBrush(QBrush(fill))
 
     # -- interaction ----------------------------------------------------
     def wheelEvent(self, event):  # noqa: N802 - Qt API
-        factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
-        self.scale(factor, factor)
+        factor = 1.25 if event.angleDelta().y() > 0 else 1 / 1.25
+        scale = self.transform().m11() * factor
+        if 2 ** (MIN_TILE_ZOOM - BASE_ZOOM - 1) <= scale <= 2 ** (MAX_TILE_ZOOM - BASE_ZOOM + 1):
+            self.scale(factor, factor)
+            self._schedule_base_map()
 
     def _apply_paint(self, event) -> None:
         tile = scene_to_tile(self.mapToScene(event.position().toPoint()))

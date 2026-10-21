@@ -29,10 +29,18 @@ Water, coastline, airport and road geometry used while meshing is downloaded
 at run time from the Overpass API. © OpenStreetMap contributors,
 https://www.openstreetmap.org/copyright
 
+## Base map tiles — CARTO / OpenStreetMap
+
+The region map loads "Dark Matter" raster tiles from CARTO
+(https://carto.com/attributions), rendered from OpenStreetMap data.
+© OpenStreetMap contributors © CARTO. Tiles are cached locally and only loaded
+while the map is visible.
+
 ## Natural Earth — public domain
 
-`xp12dem/resources/europe_land.json` (map background) is derived from Natural
-Earth 1:50m land polygons, https://www.naturalearthdata.com
+`xp12dem/resources/europe_land.json` and `europe_borders.json` (offline map)
+are derived from Natural Earth 1:50m land, admin-0 boundary lines and country
+label points, https://www.naturalearthdata.com
 
 ## Qt for Python (PySide6) — LGPL v3
 

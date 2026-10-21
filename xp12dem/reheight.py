@@ -55,6 +55,7 @@ class MeshSource:
     name: str  # pack folder name, or "X-Plane 12 Global Scenery"
     dsf: Path  # file to read
     read_root: Path  # where the pack's files can be read (.ter etc.)
+    pack_root: Optional[Path] = None  # where X-Plane sees the pack (for texture paths)
     unreadable_above: list[str] = field(default_factory=list)  # empty packs with higher priority
 
     @property
@@ -62,21 +63,43 @@ class MeshSource:
         return self.name if self.kind == "pack" else "X-Plane 12 Global Scenery (default)"
 
 
-def enabled_packs(custom_scenery: Path) -> list[str]:
-    """Pack folder names in scenery_packs.ini priority order (enabled only)."""
+def pack_entries(custom_scenery: Path) -> list[tuple[str, str]]:
+    """``(folder name, path as written)`` of enabled packs, in priority order.
+
+    Paths are usually ``Custom Scenery/<name>/`` but X-Plane also accepts
+    absolute paths (``D:/XPME/XPME_Europe/``), which tools like XPME use for
+    packages stored outside the X-Plane folder.
+    """
     ini = custom_scenery / "scenery_packs.ini"
     if not ini.is_file():
         return []
-    names = []
+    entries = []
     for line in ini.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line.startswith("SCENERY_PACK "):
             continue
-        path = line[len("SCENERY_PACK "):].strip().replace("\\", "/").rstrip("/")
-        if path.startswith("*"):
+        raw = line[len("SCENERY_PACK "):].strip()
+        path = raw.replace("\\", "/").rstrip("/")
+        if path.startswith("*") or not path:
             continue
-        names.append(path.rsplit("/", 1)[-1])
-    return names
+        entries.append((path.rsplit("/", 1)[-1], raw))
+    return entries
+
+
+def enabled_packs(custom_scenery: Path) -> list[str]:
+    """Pack folder names in scenery_packs.ini priority order (enabled only)."""
+    return [name for name, _ in pack_entries(custom_scenery)]
+
+
+def is_absolute_entry(raw: str) -> bool:
+    raw = raw.replace("\\", "/")
+    return raw.startswith("/") or bool(re.match(r"^[A-Za-z]:/", raw))
+
+
+def resolve_pack(xplane: Path, raw: str) -> Path:
+    """Folder of a scenery_packs.ini entry (relative entries are relative to X-Plane)."""
+    raw = raw.replace("\\", "/").rstrip("/")
+    return Path(raw) if is_absolute_entry(raw) else xplane / raw
 
 
 def read_dsf_properties(path: Path, seven_zip: Optional[str] = None,
@@ -111,12 +134,16 @@ def read_dsf_properties(path: Path, seven_zip: Optional[str] = None,
 class SourceUnavailable(RuntimeError):
     """A pack above the found mesh exists but cannot be read (virtual mount not running?)."""
 
-    def __init__(self, tile: Tile, packs: list[str]):
+    def __init__(self, tile: Tile, packs: list[str], checked: Optional[list[Path]] = None):
         self.packs = packs
+        where = ""
+        if checked:
+            where = " Checked: " + "; ".join(str(p) for p in checked[:6]) + \
+                    (" ..." if len(checked) > 6 else "") + "."
         super().__init__(
             f"Tile {tile}: scenery pack(s) {', '.join(packs)} are listed in scenery_packs.ini but "
             "their folders are empty or missing. If they belong to XPME or AutoOrtho, start that "
-            "program first so its scenery can be read, then build again.")
+            f"program first so its scenery can be read, then build again.{where}")
 
 
 def _is_improved_pack(folder: Path) -> bool:
@@ -153,13 +180,16 @@ def find_mesh_source(tile: Tile, xplane: Path, *, skip: Iterable[str] = (),
     rel = dsf_relpath(*tile)
     skip = {s.lower() for s in skip}
     unreadable: list[str] = []
+    checked: list[Path] = []
     extra_roots = [Path(r) for r in extra_roots]
-    for name in enabled_packs(custom):
-        if name.lower() in skip or _is_improved_pack(custom / name):
+    for name, raw in pack_entries(custom):
+        pack_root = resolve_pack(xplane, raw)
+        if name.lower() in skip or _is_improved_pack(pack_root):
             continue
-        roots = [custom / name] + [r / name for r in extra_roots]
+        roots = [pack_root] + [r / name for r in extra_roots]
         if all(_empty_or_missing(root) for root in roots):
             unreadable.append(name)
+            checked.extend(roots)
             continue
         for root in roots:
             dsf = root / rel
@@ -167,11 +197,12 @@ def find_mesh_source(tile: Tile, xplane: Path, *, skip: Iterable[str] = (),
                 props = read_dsf_properties(dsf, seven_zip, tmp_dir)
                 if props.get("sim/overlay", "0").strip() == "1":
                     break  # overlay only (roads/objects), not a base mesh
-                return MeshSource("pack", name, dsf, root, list(unreadable))
+                return MeshSource("pack", name, dsf, root, pack_root, list(unreadable))
     if unreadable and strict:
-        raise SourceUnavailable(tile, unreadable)
+        raise SourceUnavailable(tile, unreadable, checked)
     global_root = xplane / "Global Scenery" / "X-Plane 12 Global Scenery"
-    return MeshSource("global", "X-Plane 12 Global Scenery", global_root / rel, global_root)
+    return MeshSource("global", "X-Plane 12 Global Scenery", global_root / rel, global_root,
+                      global_root, list(unreadable))
 
 
 # ---------------------------------------------------------------------------
@@ -343,10 +374,10 @@ def load_runways(apt_files: Iterable[Path], tiles: Iterable[Tile], margin: float
     return result
 
 
-def apt_files_for(xplane: Path, packs: Iterable[str]) -> list[Path]:
+def apt_files_for(xplane: Path, packs: Iterable[str] = ()) -> list[Path]:
     files = [xplane / "Global Scenery" / "Global Airports" / "Earth nav data" / "apt.dat"]
-    for name in packs:
-        files.append(xplane / "Custom Scenery" / name / "Earth nav data" / "apt.dat")
+    for _, raw in pack_entries(xplane / "Custom Scenery"):
+        files.append(resolve_pack(xplane, raw) / "Earth nav data" / "apt.dat")
     return [f for f in files if f.is_file()]
 
 
