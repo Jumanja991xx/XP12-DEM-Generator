@@ -21,13 +21,8 @@ import types
 from pathlib import Path
 
 PROGRESS_PREFIX = "@@"
-
-OVERPASS_SERVERS = {
-    "DE": "https://overpass-api.de/api/interpreter",
-    "KU": "https://overpass.kumi.systems/api/interpreter",
-    "PC": "https://overpass.private.coffee/api/interpreter",
-    "RU": "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-}
+OSM_FAILED = ("OpenStreetMap data could not be downloaded - all Overpass servers are busy "
+              "or unreachable. Please try again in a few minutes")
 
 
 def emit(kind: str, **payload) -> None:
@@ -228,10 +223,9 @@ def run_job(job: dict) -> int:
     # Application level settings (module globals in Ortho4XP).
     TILE.skip_downloads = True  # imagery is streamed by AutoOrtho
     TILE.skip_converts = True
-    # Ortho4XP picks a server at random for every retry; keep only public
-    # Overpass instances that are still operating.
-    OSM.overpass_servers = dict(OVERPASS_SERVERS)
-    OSM.overpass_server_choice = job.get("overpass_server", "random")
+    from xp12dem import overpass
+
+    overpass.install(OSM, UI)
     OVL.custom_overlay_src = prepare_global_dsf(job.get("global_scenery", ""), lat, lon,
                                                 o4x_root, work)
 
@@ -284,7 +278,16 @@ def run_job(job: dict) -> int:
         started = time.time()
         UI.is_working = False
         UI.red_flag = False
-        action()
+        try:
+            action()
+        except Exception:
+            if key == "vector" and overpass.failed_queries:
+                emit("error", step=key, message=f"{OSM_FAILED} ({overpass.failed_queries[-1]})")
+                return 2
+            raise
+        if key == "vector" and overpass.failed_queries:
+            emit("error", step=key, message=f"{OSM_FAILED} ({overpass.failed_queries[-1]})")
+            return 2
         if not check():
             emit("error", step=key, message=f"Ortho4XP step '{key}' did not produce its output")
             return 2
