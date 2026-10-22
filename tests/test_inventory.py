@@ -55,3 +55,45 @@ def test_scan_finds_custom_scenery_and_absolute_packs(tmp_path):
 def test_scan_without_xplane(tmp_path):
     inv = inventory.scan(None, tmp_path / "nothing")
     assert inv.packs == [] and inv.installed == {} and inv.cached == {}
+
+
+def test_same_name_in_two_places_counts_both(tmp_path):
+    xp = tmp_path / "X-Plane 12"
+    custom = xp / "Custom Scenery"
+    custom.mkdir(parents=True)
+    _pack(custom, "z_dem_my_region", [(47, 11)])  # old copy, not listed
+    xpme = tmp_path / "XPME" / "BasePack"
+    xpme.mkdir(parents=True)
+    (xpme / "XPME_Europe").mkdir()
+    _pack(xpme, "z_dem_my_region", [(47, 10), (46, 11), (45, 11)])
+    (custom / "scenery_packs.ini").write_text(
+        "I\n1000 Version\nSCENERY\n\n"
+        f"SCENERY_PACK {(xpme / 'z_dem_my_region').as_posix()}/\n"
+        f"SCENERY_PACK {(xpme / 'XPME_Europe').as_posix()}/\n", encoding="utf-8")
+    inv = inventory.scan(xp, tmp_path / "dem")
+    assert len(inv.packs) == 2
+    assert {t for t in inv.installed} == {(47, 11), (47, 10), (46, 11), (45, 11)}
+    assert inv.active_on((47, 10)) and not inv.active_on((47, 11))
+
+
+def test_pack_next_to_xpme_found_when_ini_lost_it(tmp_path):
+    xp = tmp_path / "X-Plane 12"
+    custom = xp / "Custom Scenery"
+    custom.mkdir(parents=True)
+    xpme = tmp_path / "XPME" / "BasePack"
+    (xpme / "XPME_Europe").mkdir(parents=True)
+    _pack(xpme, "z_dem_my_region", [(47, 10), (47, 11)])
+    # XPME rewrote the file without our line
+    (custom / "scenery_packs.ini").write_text(
+        f"I\n1000 Version\nSCENERY\n\nSCENERY_PACK {(xpme / 'XPME_Europe').as_posix()}/\n",
+        encoding="utf-8")
+    inv = inventory.scan(xp, tmp_path / "dem")
+    assert [p.name for p in inv.inactive()] == ["z_dem_my_region"]
+    from xp12dem.installer import reactivate_pack
+
+    reactivate_pack(inv.inactive()[0].path, xp, ["XPME_Europe"])
+    lines = (custom / "scenery_packs.ini").read_text().splitlines()
+    ours = [i for i, l in enumerate(lines) if "z_dem_my_region" in l]
+    theirs = [i for i, l in enumerate(lines) if "XPME_Europe" in l]
+    assert ours and ours[0] < theirs[0] and lines[ours[0]].endswith("BasePack/z_dem_my_region/")
+    assert not inventory.scan(xp, tmp_path / "dem").inactive()

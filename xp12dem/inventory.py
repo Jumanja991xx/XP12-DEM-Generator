@@ -100,6 +100,13 @@ def read_pack(path: Path, enabled: bool = True) -> Optional[InstalledPack]:
                          improves=[i for i in improves if not i.startswith("X-Plane 12 Global")])
 
 
+def _same(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return str(a).lower() == str(b).lower()
+
+
 def installed_packs(xplane: Optional[Path], extra_roots: Iterable[Path] = ()) -> list[InstalledPack]:
     """All packs made by this app: listed in scenery_packs.ini (also absolute
     paths, e.g. next to XPME) or lying in Custom Scenery / AutoOrtho's folder."""
@@ -107,14 +114,14 @@ def installed_packs(xplane: Optional[Path], extra_roots: Iterable[Path] = ()) ->
     from .reheight import is_absolute_entry, pack_entries, resolve_pack
 
     found: dict[str, tuple[Path, bool]] = {}
-    listed: set[str] = set()  # pack names enabled in scenery_packs.ini
+    listed: dict[str, Path] = {}  # pack name -> folder enabled in scenery_packs.ini
     roots = list(extra_roots)
     if xplane is not None:
         custom = xplane / "Custom Scenery"
         for name, raw in pack_entries(custom):
             if _is_dem_pack(name):
-                listed.add(name.lower())
                 path = resolve_pack(xplane, raw)
+                listed[name.lower()] = path
                 found[str(path).lower()] = (path, True)
             elif is_absolute_entry(raw):
                 # packages stored outside X-Plane (XPME): our packs sit next to them
@@ -132,15 +139,27 @@ def installed_packs(xplane: Optional[Path], extra_roots: Iterable[Path] = ()) ->
             key = str(child).lower()
             if _is_dem_pack(child.name) and key not in found:
                 # e.g. AutoOrtho's folder, or a pack missing from scenery_packs.ini
-                found[key] = (child, xplane is None or child.name.lower() in listed)
+                entry = listed.get(child.name.lower())
+                # active if scenery_packs.ini points here - or to a place that only exists
+                # while AutoOrtho runs (its packs are mounted into Custom Scenery)
+                active = xplane is None or (entry is not None and (_same(entry, child) or not entry.exists()))
+                found[key] = (child, active)
     packs = []
-    names: set[str] = set()
+    seen: set[str] = set()
     for path, is_enabled in found.values():
+        try:
+            real = str(path.resolve()).lower()
+        except OSError:
+            real = str(path).lower()
+        if real in seen:  # same folder reached twice (e.g. via the ini and a folder scan)
+            continue
         pack = read_pack(path, is_enabled)
-        if pack is not None and pack.name.lower() not in names:
-            names.add(pack.name.lower())
+        if pack is not None:
+            seen.add(real)
             packs.append(pack)
-    return sorted(packs, key=lambda p: p.name.lower())
+    # one name in several places (e.g. an old copy in Custom Scenery): keep all, the
+    # one scenery_packs.ini points to counts as active
+    return sorted(packs, key=lambda p: (p.name.lower(), not p.enabled))
 
 
 def cached_dems(cache_dir: Path) -> dict[Tile, list[str]]:
