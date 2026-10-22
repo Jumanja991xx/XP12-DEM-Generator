@@ -56,6 +56,7 @@ def mesh_detail(key: str) -> MeshDetail:
     raise KeyError(key)
 
 
+OSM_FAILED_TEXT = "OpenStreetMap data could not be downloaded"
 XPME_NOT_RUNNING = ("XPME is not running (or still loading): {} does not provide its terrain files. "
                     "Start XPME, wait until it has finished loading, then build again.")
 
@@ -384,7 +385,20 @@ class Pipeline:
             self.events.log(f"{name}: X-Plane 12 Global Scenery not found - "
                             "DSF will be built without XP12 bathymetry rasters.")
         self.events.log(f"{name}: starting Ortho4XP")
-        return self._run_worker(tile, job, build_dir)
+        try:
+            return self._run_worker(tile, job, build_dir)
+        except Cancelled:
+            raise
+        except RuntimeError as exc:
+            if OSM_FAILED_TEXT in str(exc):
+                raise
+            # the apron levelling adds geometry; never let it cost a tile
+            self.events.log(f"{name}: build failed ({short_error(str(exc))}) - "
+                            "retrying without levelled aprons")
+            job["level_aprons"] = False
+            if build_dir.exists():
+                shutil.rmtree(build_dir)
+            return self._run_worker(tile, job, build_dir)
 
     def _resolve_sources(self, tiles: list[Tile], result: BuildResult, own_pack: str):
         """Which base mesh is active for each tile, plus nearby runways."""

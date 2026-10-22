@@ -255,6 +255,12 @@ def run_job(job: dict) -> int:
     from xp12dem import overpass
 
     overpass.install(OSM, UI, log=lambda text: emit("log", message=text.strip()))
+    import O4_Airport_Utils as APT
+    import O4_Vector_Utils as VECT
+    from xp12dem import aprons
+
+    if job.get("level_aprons", True):
+        aprons.install(APT, VECT, log=lambda text: emit("log", message=text))
     # Ortho4XP's headline messages ("-> Dealing with roads") show what it is working on
     plain_vprint = UI.vprint
 

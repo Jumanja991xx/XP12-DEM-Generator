@@ -59,6 +59,8 @@ and, on the Create page, *Custom Scenery, photos from XPME*. Ortho4XP builds the
 same photo tiling XPME uses (Bing, zoom 16, zoom 18 around airports); the terrain files point
 straight at `XPME_<region>/textures/…`, which XPME delivers on demand. The pack is installed as
 `Custom Scenery/z_dem_mesh_<region>` above XPME's packages. XPME must be running while you fly.
+Runways keep their real (smoothed) profile - Courchevel stays steep - while aprons are laid as
+gently sloped planes (max. 1.5 %), so parked aircraft stand level.
 
 ## Quick start (Windows 10/11)
 
