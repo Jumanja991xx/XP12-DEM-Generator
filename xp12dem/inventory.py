@@ -33,6 +33,7 @@ class InstalledPack:
     improves: list[str] = field(default_factory=list)  # packs whose terrain it re-heights
     misplaced: bool = False  # stored outside Custom Scenery (e.g. in XPME's folder) - should move
     broken: dict[Tile, list[str]] = field(default_factory=dict)  # tile -> missing terrain files
+    overridden_by: str = ""  # a pack it improves is listed above it (e.g. after XPME re-sorted the ini)
 
     def describe(self) -> str:
         what = "improved terrain" if self.method == "improve" else "new mesh"
@@ -61,10 +62,11 @@ class Inventory:
     def needs_fix(self) -> list[InstalledPack]:
         """Inactive packs, packs in a folder another tool manages (XPME), packs with
         tiles X-Plane refuses (missing terrain files)."""
-        return [p for p in self.packs if not p.enabled or p.misplaced or p.broken]
+        return [p for p in self.packs if not p.enabled or p.misplaced or p.broken or p.overridden_by]
 
     def active_on(self, tile: Tile) -> bool:
-        return any(p.enabled and tile not in p.broken for p in self.installed.get(tile, []))
+        return any(p.enabled and not p.overridden_by and tile not in p.broken
+                   for p in self.installed.get(tile, []))
 
 
 def _is_dem_pack(name: str) -> bool:
@@ -202,9 +204,14 @@ def installed_packs(xplane: Optional[Path], extra_roots: Iterable[Path] = ()) ->
     if xplane is not None:
         custom = xplane / "Custom Scenery"
         mounted = [Path(r) for r in extra_roots]  # AutoOrtho storage: fine where it is
+        order = [name.lower() for name, _ in pack_entries(custom)]
         for pack in packs:
             parent = pack.path.parent
             pack.misplaced = not _same(parent, custom) and not any(_same(parent, m) for m in mounted)
+            if pack.enabled and pack.name.lower() in order:
+                mine = order.index(pack.name.lower())
+                above = [i for i in pack.improves if i.lower() in order and order.index(i.lower()) < mine]
+                pack.overridden_by = above[0] if above else ""
     return sorted(packs, key=lambda p: (p.name.lower(), not p.enabled))
 
 

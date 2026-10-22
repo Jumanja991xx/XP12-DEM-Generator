@@ -496,6 +496,9 @@ class MainWindow(QMainWindow):
                 if p.misplaced:
                     why.append(f"stored in {p.path.parent} - XPME drops such entries when it "
                                "rewrites scenery_packs.ini")
+                if p.overridden_by:
+                    why.append(f"listed below {p.overridden_by} in scenery_packs.ini, so X-Plane uses "
+                               f"{p.overridden_by}'s terrain instead (XPME may have re-sorted the file)")
                 if p.broken:
                     names = ", ".join(regions.tile_name(*t) for t in sorted(p.broken)[:6])
                     more = f" … (+{len(p.broken) - 6})" if len(p.broken) > 6 else ""

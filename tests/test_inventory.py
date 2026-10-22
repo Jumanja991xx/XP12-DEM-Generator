@@ -149,3 +149,26 @@ def test_users_xpme_setup_is_detected_and_fixed(tmp_path):
     ref = (custom / "z_dem_my_region" / "terrain" / "t.ter").read_text().split()[1]
     assert (custom / "z_dem_my_region" / "terrain" / ref).resolve() == \
         (basepack / "XPME_Europe" / "textures" / "t.dds").resolve()
+
+
+def test_pack_listed_below_the_scenery_it_improves(tmp_path):
+    from xp12dem.installer import reactivate_pack
+
+    xp = tmp_path / "X-Plane 12"
+    custom = xp / "Custom Scenery"
+    custom.mkdir(parents=True)
+    bp = tmp_path / "XPMapEnhancement" / "BasePack"
+    (bp / "XPME_Europe").mkdir(parents=True)
+    _pack(custom, "z_dem_budapest", [(47, 18)], {"method": "improve", "sources": {"+47+018": "XPME_Europe"}})
+    (custom / "scenery_packs.ini").write_text(
+        "I\n1000 version\nSCENERY\n\n"
+        f"SCENERY_PACK {(bp / 'XPME_Europe').as_posix()}/\n"
+        "SCENERY_PACK Custom Scenery/z_dem_budapest/\n"
+        f"SCENERY_PACK {bp.as_posix()}/\n", encoding="utf-8")
+    inv = inventory.scan(xp, tmp_path / "dem")
+    pack = inv.pack("z_dem_budapest")
+    assert pack.overridden_by == "XPME_Europe" and inv.needs_fix() == [pack]
+    assert not inv.active_on((47, 18))
+    reactivate_pack(pack.path, xp, pack.improves)  # what "Fix now" does
+    inv = inventory.scan(xp, tmp_path / "dem")
+    assert not inv.needs_fix() and inv.active_on((47, 18))
