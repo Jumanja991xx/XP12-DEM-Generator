@@ -493,11 +493,8 @@ def retarget_ter(text: str, old_ter: Path, new_ter: Path) -> str:
     return "\n".join(out) + "\n"
 
 
-def _is_water_ter(path: Path) -> bool:
-    try:
-        return any(line.strip() == "WET" for line in path.read_text("utf-8", "replace").splitlines())
-    except OSError:
-        return False
+def _is_water_text(text: str) -> bool:
+    return any(line.strip() == "WET" for line in text.splitlines())
 
 
 @dataclass
@@ -555,7 +552,41 @@ def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: Mes
     defs: list[str] = []
     water_ids: set[int] = set()
 
-    # Pass 1: terrain definitions and vertices on water patches.
+    # Terrain definitions (DSFTool writes them before the first patch).
+    with open(src_txt, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if line.startswith("TERRAIN_DEF"):
+                defs.append(line.split(None, 1)[1].strip())
+            elif line.startswith("BEGIN_PATCH"):
+                break
+
+    # Read every local terrain file once: needed to spot water, and copied for packs.
+    # A virtual drive (XPME) may need a moment per file, so report progress and never
+    # wait more than ~20 s in total for files that do not come.
+    import time as _time
+
+    local = [d for d in dict.fromkeys(defs) if not d.startswith(LIB_PREFIXES) and d.lower() not in WATER_DEFS]
+    log(f"   reading {len(local)} terrain definitions from {source.name}")
+    texts: dict[str, Optional[str]] = {}
+    waited, started, last_report = 0.0, _time.monotonic(), _time.monotonic()
+    for index, name in enumerate(local, 1):
+        attempts = 5 if waited < 20 else 1
+        t0 = _time.monotonic()
+        text = read_text_retry(source.read_root / name, attempts=attempts)
+        if text is None:
+            waited += _time.monotonic() - t0
+        texts[name] = text
+        now = _time.monotonic()
+        if index % 100 == 0 or now - last_report > 15:
+            last_report = now
+            log(f"   {index} of {len(local)} terrain definitions read ({now - started:.0f} s)")
+    for index, name in enumerate(defs):
+        text = texts.get(name)
+        if name.lower() in WATER_DEFS or (text is not None and _is_water_text(text)):
+            water_ids.add(index)
+
+    # Pass 1: height range and vertices on water patches.
+    log("   scanning mesh")
     water_keys: set[tuple[int, int]] = set()
     current_water = False
     orig_lo, orig_hi = math.inf, -math.inf
@@ -578,49 +609,26 @@ def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: Mes
                     elev = float(parts[5])
                     other_lo, other_hi = min(other_lo, elev), max(other_hi, elev)
                 continue
-            if line.startswith("TERRAIN_DEF"):
-                name = line.split(None, 1)[1].strip()
-                if name.lower() in WATER_DEFS or (
-                        not name.startswith(LIB_PREFIXES) and _is_water_ter(source.read_root / name)):
-                    water_ids.add(len(defs))
-                defs.append(name)
-            elif line.startswith("BEGIN_PATCH"):
+            if line.startswith("BEGIN_PATCH"):
                 current_water = int(line.split()[1]) in water_ids
 
     # Copy local terrain definitions so their textures point back to the source pack.
     if source.kind == "pack":
-        import time as _time
-
-        unreadable = []
-        local = [d for d in defs if not d.startswith(LIB_PREFIXES) and d.lower() not in WATER_DEFS]
-        log(f"   copying {len(local)} terrain definitions from {source.name}")
-        waited, started = 0.0, _time.monotonic()
-        for index, name in enumerate(local, 1):
-            # a virtual drive may need a moment for the first files; never wait more than
-            # ~20 s in total, so a missing file cannot stall the build
-            attempts = 5 if waited < 20 else 1
-            t0 = _time.monotonic()
-            text = read_text_retry(source.read_root / name, attempts=attempts)
-            waited += _time.monotonic() - t0 if text is None else 0.0
-            if index % 100 == 0:
-                log(f"   {index} of {len(local)} terrain definitions copied "
-                    f"({_time.monotonic() - started:.0f} s)")
-            if text is None:
-                if not unreadable:
-                    log(f"   {source.name} does not provide {name}")
-                unreadable.append(name)
-                continue
-            dst = out_pack / name
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_text(rewrite_ter(text, name, source.name, source.pack_root or source.read_root,
-                                       install_dir), encoding="utf-8")
-            stats.copied_terrains += 1
+        unreadable = [name for name in local if texts[name] is None]
         if unreadable:
+            log(f"   {source.name} does not provide {unreadable[0]}")
             raise RuntimeError(
                 f"{source.name} did not provide {len(unreadable)} terrain file(s), e.g. "
                 f"{unreadable[0]} - make sure XPME / AutoOrtho is running and has finished "
                 "loading, then retry this tile. (The tile was not installed, so X-Plane keeps "
                 "the original terrain.)")
+        log(f"   copying {len(local)} terrain definitions from {source.name}")
+        for name in local:
+            dst = out_pack / name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text(rewrite_ter(texts[name], name, source.name, source.pack_root or source.read_root,
+                                       install_dir), encoding="utf-8")
+            stats.copied_terrains += 1
 
     # Height range the new DSF must be able to store.
     finite = hf.grid[np.isfinite(hf.grid)]
@@ -636,6 +644,7 @@ def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: Mes
     saw_heights = False
     current_water = False
     buffer: list[str] = []
+    progress = [0]
 
     def flush() -> None:
         if not buffer:
@@ -649,6 +658,9 @@ def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: Mes
         else:
             _write_vertices(rows, out)
         buffer.clear()
+        if stats.vertices // 1_000_000 > progress[0]:
+            progress[0] = stats.vertices // 1_000_000
+            log(f"   {progress[0]} million vertices done")
 
     def _write_vertices(rows, sink) -> None:
         arr = np.array([[float(v) for v in r[1:]] for r in rows], dtype=np.float64)
