@@ -76,6 +76,7 @@ def fetch(query, bbox, log: Callable[[str], None] = print,
                 log(f"        Giving up after {MAX_SECONDS // 60} minutes without a valid answer")
                 failed_queries.append(last_error or "timeout")
                 return 0
+            started = clock()
             try:
                 response = session.post(url, data={"data": data}, timeout=REQUEST_TIMEOUT)
             except requests.RequestException as exc:
@@ -85,6 +86,7 @@ def fetch(query, bbox, log: Callable[[str], None] = print,
             content = response.content
             if response.status_code == 200 and _looks_complete(content):
                 last_error = None
+                log(f"        received {len(content) / 1e6:.1f} MB from {name} in {clock() - started:.0f} s")
                 return content
             if response.status_code == 200:
                 reason = "incomplete answer"
@@ -103,11 +105,15 @@ def fetch(query, bbox, log: Callable[[str], None] = print,
     return 0
 
 
-def install(osm_module, ui_module) -> None:
+def install(osm_module, ui_module, log: Optional[Callable[[str], None]] = None) -> None:
     """Replace Ortho4XP's Overpass downloader with :func:`fetch`."""
+    log = log or (lambda text: ui_module.vprint(1, text))
+    counter = [0]
 
     def get_overpass_data(query, bbox, server_code=None):
-        return fetch(query, bbox, log=lambda text: ui_module.vprint(1, text),
-                     is_cancelled=lambda: bool(ui_module.red_flag))
+        counter[0] += 1
+        what = query if isinstance(query, str) else query[0]
+        log(f"OSM query {counter[0]}: {what.strip()[:60]}")
+        return fetch(query, bbox, log=log, is_cancelled=lambda: bool(ui_module.red_flag))
 
     osm_module.get_overpass_data = get_overpass_data

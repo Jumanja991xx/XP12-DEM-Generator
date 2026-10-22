@@ -254,7 +254,17 @@ def run_job(job: dict) -> int:
     TILE.skip_converts = True
     from xp12dem import overpass
 
-    overpass.install(OSM, UI)
+    overpass.install(OSM, UI, log=lambda text: emit("log", message=text.strip()))
+    # Ortho4XP's headline messages ("-> Dealing with roads") show what it is working on
+    plain_vprint = UI.vprint
+
+    def vprint(min_verbosity, *args):
+        plain_vprint(min_verbosity, *args)
+        text = " ".join(str(a) for a in args).strip()
+        if min_verbosity == 0 and text.startswith("->"):
+            emit("log", message=text[2:].strip())
+
+    UI.vprint = vprint
     OVL.custom_overlay_src = prepare_global_dsf(job.get("global_scenery", ""), lat, lon,
                                                 o4x_root, work)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 import sys
@@ -999,12 +1000,13 @@ class MainWindow(QMainWindow):
         measured = TimingHistory(paths.data_root() / "timings.json").typical(
             build_key(self._method_key(), self._res_key(), self._mesh_key()))
         if measured:  # real build times on this PC
-            return measured / 60 * count / max(1, self._parallel())
-        if self._method_key() == "improve":
+            per_tile = measured / 60
+        elif self._method_key() == "improve":
             per_tile = _IMPROVE_MINUTES[self._res_key()]
         else:
             per_tile = _MINUTES[(self._res_key(), self._mesh_key())]
-        return per_tile * count / max(1, self._parallel())
+        # tiles built side by side; a single tile is never faster than one build
+        return per_tile * math.ceil(count / max(1, self._parallel())) if count else 0.0
 
     def _sources_preview(self, tiles) -> str:
         """Which terrain each tile currently uses (shown before building)."""
