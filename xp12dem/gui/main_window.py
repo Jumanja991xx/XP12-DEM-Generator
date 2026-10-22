@@ -376,9 +376,10 @@ class MainWindow(QMainWindow):
         self.inactive_label.setTextFormat(Qt.RichText)
         self.inactive_label.setWordWrap(True)
         inactive_row.addWidget(self.inactive_label, 1)
-        self.activate_btn = QPushButton("Activate in X-Plane")
+        self.activate_btn = QPushButton("Fix now")
         self.activate_btn.setObjectName("primary")
-        self.activate_btn.setToolTip("Add the packs to scenery_packs.ini again, above the scenery they improve")
+        self.activate_btn.setToolTip("Move the packs into Custom Scenery and list them in scenery_packs.ini, "
+                                     "above the scenery they improve")
         self.activate_btn.clicked.connect(self._activate_inactive)
         inactive_row.addWidget(self.activate_btn)
         right_layout.addLayout(inactive_row)
@@ -483,36 +484,49 @@ class MainWindow(QMainWindow):
             self.have_label.setText(text)
         self.missing_btn.setEnabled(bool(tiles) and bool(installed) and bool(missing))
         self.installed_btn.setEnabled(bool(inv.installed))
-        inactive = inv.inactive()
-        self.inactive_label.setVisible(bool(inactive))
-        self.activate_btn.setVisible(bool(inactive))
-        if inactive:
+        broken = inv.needs_fix()
+        self.inactive_label.setVisible(bool(broken))
+        self.activate_btn.setVisible(bool(broken))
+        if broken:
+            lines = []
+            for p in broken:
+                why = []
+                if not p.enabled:
+                    why.append("not listed in scenery_packs.ini, so X-Plane ignores it")
+                if p.misplaced:
+                    why.append(f"stored in {p.path.parent} - XPME drops such entries when it "
+                               "rewrites scenery_packs.ini")
+                lines.append(f"<b>{p.name}</b> ({len(p.tiles)} tiles): " + "; ".join(why))
             self.inactive_label.setText(
-                "<span style='color:#ff9a1f'><b>⚠ Installed but not active:</b> "
-                + ", ".join(f"{p.name} ({len(p.tiles)} tiles)" for p in inactive)
-                + " - the folder exists, but scenery_packs.ini does not list it (XPME or another "
-                "tool may have rewritten the file), so X-Plane ignores it.</span>")
+                "<span style='color:#ff9a1f'><b>⚠ Needs a fix:</b> " + "<br>".join(lines)
+                + "<br>Fix now moves it into Custom Scenery (textures keep working) and lists it "
+                "above the scenery it improves.</span>")
 
     def _activate_inactive(self) -> None:
-        from ..installer import reactivate_pack
+        from ..installer import reactivate_pack, relocate_pack
 
         if self.xplane is None:
             return
-        errors = []
-        for pack in self.inventory.inactive():
+        custom = self.xplane / "Custom Scenery"
+        errors, moved = [], []
+        # several copies of one name: merge all into Custom Scenery/<name>
+        for pack in self.inventory.needs_fix():
             try:
-                reactivate_pack(pack.path, self.xplane, pack.improves)
+                target = custom / pack.name
+                if pack.misplaced and pack.path.exists():
+                    relocate_pack(pack.path, target)
+                    moved.append(f"{pack.name}: {pack.path.parent} → Custom Scenery")
+                reactivate_pack(target if pack.misplaced else pack.path, self.xplane, pack.improves)
             except OSError as exc:
                 errors.append(f"{pack.name}: {exc}")
         self._refresh_inventory()
         if errors:
-            QMessageBox.warning(self, APP_NAME, "Could not update scenery_packs.ini:\n" + "\n".join(errors))
+            QMessageBox.warning(self, APP_NAME, "Could not fix everything:\n" + "\n".join(errors))
         else:
             QMessageBox.information(
-                self, APP_NAME, "Done - the packs are listed in scenery_packs.ini again (a backup is "
-                "stored as scenery_packs.ini.xp12dem.bak).\n\nIf they disappear again after starting "
-                "XPME, XPME rewrites the file on start - activate them again after XPME has started, "
-                "before launching X-Plane.")
+                self, APP_NAME, "Done.\n\n" + ("\n".join(moved) + "\n\n" if moved else "")
+                + "The packs are listed in scenery_packs.ini above the scenery they improve (backup: "
+                "scenery_packs.ini.xp12dem.bak).")
 
     def _select_missing(self) -> None:
         self.map.set_selected(self.inventory.missing(self.map.selected()), focus=False)
@@ -1173,8 +1187,9 @@ class MainWindow(QMainWindow):
                       "page. Try <b>Retry failed tiles</b>, or 3\" resolution for these tiles.</span></p>")
         if improve:
             steps = ("<li>Keep the original scenery installed - XPME / AutoOrtho still deliver "
-                     "the textures. If XPME re-orders scenery_packs.ini, make sure "
-                     "<code>z_dem_…</code> stays above the XPME packages.</li>"
+                     "the textures. The pack is listed in front of XPME's block in "
+                     "scenery_packs.ini; if it ever shows up as <i>Needs a fix</i> on step 1, "
+                     "click <b>Fix now</b>.</li>"
                      "<li>Rebuild this pack after XPME / AutoOrtho update their base packages "
                      "or after flattening an airport in XPME.</li>")
         else:

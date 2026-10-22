@@ -387,11 +387,26 @@ def apt_files_for(xplane: Path, packs: Iterable[str] = ()) -> list[Path]:
 _PATH_EXT = re.compile(r"\.(dds|png|bmp|ter|pol|dcl|for|fac|obj|net|lin|str|agp)$", re.IGNORECASE)
 
 
-def rewrite_ter(text: str, ter_rel: str, source_pack: str) -> str:
+def relative_ref(target: Path, from_dir: Path) -> str:
+    """Path from ``from_dir`` to ``target`` for a .ter file (forward slashes).
+
+    X-Plane resolves .ter references against the .ter file's folder, also
+    across folders outside X-Plane (XPME keeps its packages in Documents).
+    Different drives cannot be reached relatively: then the absolute path is used.
+    """
+    try:
+        return os.path.relpath(str(target), str(from_dir)).replace("\\", "/")
+    except ValueError:  # different drive on Windows
+        return Path(target).as_posix()
+
+
+def rewrite_ter(text: str, ter_rel: str, source_pack: str, source_dir: Optional[Path] = None,
+                install_dir: Optional[Path] = None) -> str:
     """Point relative file references of a .ter at the source pack.
 
-    The copy lives at ``<new pack>/<ter_rel>``; references are resolved
-    against the original location ``<source pack>/<ter_rel>``.
+    The copy lives at ``<install_dir>/<ter_rel>``; references are resolved
+    against the original location ``<source_dir>/<ter_rel>``. Without the two
+    folders both packs are assumed to sit side by side.
     """
     ter_dir = Path(ter_rel).parent
     up = "../" * (len(ter_dir.parts) + 1)
@@ -402,7 +417,24 @@ def rewrite_ter(text: str, ter_rel: str, source_pack: str) -> str:
             ref = parts[1].strip().replace("\\", "/")
             resolved = os.path.normpath(os.path.join(str(ter_dir), ref)).replace("\\", "/")
             if not resolved.startswith(".."):
-                line = f"{parts[0]} {up}{source_pack}/{resolved}"
+                if source_dir is not None and install_dir is not None:
+                    line = f"{parts[0]} {relative_ref(Path(source_dir) / resolved, Path(install_dir) / ter_dir)}"
+                else:
+                    line = f"{parts[0]} {up}{source_pack}/{resolved}"
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def retarget_ter(text: str, old_ter: Path, new_ter: Path) -> str:
+    """Keep the references of a .ter valid when the file moves to ``new_ter``."""
+    out = []
+    for line in text.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and _PATH_EXT.search(parts[1].strip()) and not parts[1].startswith(LIB_PREFIXES):
+            ref = parts[1].strip().replace("\\", "/")
+            target = Path(ref) if Path(ref).is_absolute() or re.match(r"^[A-Za-z]:/", ref) else \
+                Path(os.path.normpath(os.path.join(str(old_ter.parent), ref)))
+            line = f"{parts[0]} {relative_ref(target, new_ter.parent)}"
         out.append(line)
     return "\n".join(out) + "\n"
 
@@ -445,7 +477,7 @@ def tight_heights(need_lo: float, need_hi: float) -> tuple[float, float]:
 
 def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: MeshSource,
                       out_pack: Path, work: Path, log: Log = print,
-                      keep_height_range: bool = False) -> ReheightStats:
+                      keep_height_range: bool = False, install_dir: Optional[Path] = None) -> ReheightStats:
     """Rewrite a DSFTool text file with LiDAR elevations.
 
     ``keep_height_range`` is the fallback mode: instead of widening the DSF's
@@ -496,7 +528,8 @@ def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: Mes
             if src.is_file():
                 dst = out_pack / name
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                dst.write_text(rewrite_ter(src.read_text("utf-8", "replace"), name, source.name),
+                dst.write_text(rewrite_ter(src.read_text("utf-8", "replace"), name, source.name,
+                                           source.pack_root or source.read_root, install_dir),
                                encoding="utf-8")
                 stats.copied_terrains += 1
 
@@ -655,7 +688,7 @@ def _first_error(text: str) -> str:
 
 def reheight_tile(tile: Tile, source: MeshSource, hf: HeightField, out_pack: Path,
                   work: Path, dsftool: str, seven_zip: Optional[str],
-                  log: Log = print) -> ReheightStats:
+                  log: Log = print, install_dir: Optional[Path] = None) -> ReheightStats:
     work.mkdir(parents=True, exist_ok=True)
     if not source.dsf.is_file():
         raise FileNotFoundError(f"Source DSF not found: {source.dsf}")
@@ -666,7 +699,7 @@ def reheight_tile(tile: Tile, source: MeshSource, hf: HeightField, out_pack: Pat
     log("   converting DSF to text")
     run_dsftool(dsftool, "--dsf2text", str(plain), str(src_txt))
     log("   applying LiDAR elevations")
-    stats = reheight_dsf_text(src_txt, dst_txt, hf, source, out_pack, work, log)
+    stats = reheight_dsf_text(src_txt, dst_txt, hf, source, out_pack, work, log, install_dir=install_dir)
     if stats.heights_range:
         lo, hi = stats.heights_range
         log(f"   storable height range {lo:.0f} .. {hi:.0f} m")
@@ -680,7 +713,7 @@ def reheight_tile(tile: Tile, source: MeshSource, hf: HeightField, out_pack: Pat
         log(f"   DSFTool refused the new heights ({_first_error(str(exc))}) - "
             "retrying with heights limited to the original range")
         stats = reheight_dsf_text(src_txt, dst_txt, hf, source, out_pack, work, log,
-                                  keep_height_range=True)
+                                  keep_height_range=True, install_dir=install_dir)
         log(f"   {stats.clamped} vertices limited")
         log("   writing new DSF (fallback)")
         run_dsftool(dsftool, "--text2dsf", str(dst_txt), str(target))

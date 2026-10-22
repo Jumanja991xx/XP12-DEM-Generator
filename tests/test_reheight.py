@@ -315,3 +315,40 @@ def test_short_error_for_dsftool_dump():
                'ERROR: !"ERROR: could not sink vertex:\\n"\n(D:\\a\\DSFLibWrite.cpp, 834.)')
     assert short_error(message) == "RuntimeError: DSFTool --text2dsf failed: ERROR: could not sink vertex"
     assert short_error("No elevation data for N47E011") == "No elevation data for N47E011"
+
+
+def test_ter_paths_reach_xpme_from_custom_scenery(tmp_path):
+    text = "A\n800\nTERRAIN\nBASE_TEX ../textures/24000_34000_BI16.dds\nNO_ALPHA\n"
+    source_dir = tmp_path / "Users" / "me" / "Documents" / "XPMapEnhancement" / "BasePack" / "XPME_Europe"
+    install_dir = tmp_path / "X-Plane 12" / "Custom Scenery" / "z_dem_tyrol"
+    out = RH.rewrite_ter(text, "terrain/24000_34000_BI16.ter", "XPME_Europe", source_dir, install_dir)
+    ref = [l for l in out.splitlines() if l.startswith("BASE_TEX")][0].split(None, 1)[1]
+    resolved = (install_dir / "terrain" / ref).resolve()
+    assert resolved == (source_dir / "textures" / "24000_34000_BI16.dds").resolve()
+    # side by side (no folders given) keeps the old short form
+    assert "BASE_TEX ../../XPME_Europe/textures/24000_34000_BI16.dds" in RH.rewrite_ter(
+        text, "terrain/24000_34000_BI16.ter", "XPME_Europe")
+
+
+def test_relocating_a_pack_keeps_texture_paths_and_merges(tmp_path):
+    basepack = tmp_path / "XPME" / "BasePack"
+    old = basepack / "z_dem_my_region"
+    (old / "terrain").mkdir(parents=True)
+    (old / "terrain" / "a.ter").write_text("BASE_TEX ../../XPME_Europe/textures/a.dds\n")
+    dsf = old / "Earth nav data" / "+40+010" / "+47+010.dsf"
+    dsf.parent.mkdir(parents=True)
+    dsf.write_bytes(b"x")
+    (old / "xp12dem_pack.json").write_text('{"tiles": [[47, 10]], "sources": {"+47+010": "XPME_Europe"}}')
+    custom = tmp_path / "X-Plane 12" / "Custom Scenery"
+    existing = custom / "z_dem_my_region"
+    (existing / "Earth nav data" / "+40+010").mkdir(parents=True)
+    (existing / "Earth nav data" / "+40+010" / "+47+011.dsf").write_bytes(b"y")
+    (existing / "xp12dem_pack.json").write_text('{"tiles": [[47, 11]], "sources": {"+47+011": "XPME_Europe"}}')
+    installer.relocate_pack(old, existing)
+    assert not old.exists()
+    ref = (existing / "terrain" / "a.ter").read_text().split()[1]
+    assert (existing / "terrain" / ref).resolve() == (basepack / "XPME_Europe" / "textures" / "a.dds").resolve()
+    import json
+    manifest = json.loads((existing / "xp12dem_pack.json").read_text())
+    assert manifest["tiles"] == [[47, 10], [47, 11]] and set(manifest["sources"]) == {"+47+010", "+47+011"}
+    assert (existing / "Earth nav data" / "+40+010" / "+47+010.dsf").is_file()

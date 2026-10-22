@@ -92,11 +92,15 @@ very visible.
 
 * XPME's base packages are Ortho4XP-style meshes served through its own virtual drive. The
   improved pack re-uses XPME's textures, so **XPME must stay installed and running**.
-* If XPME keeps its packages outside X-Plane (absolute paths such as `D:/XPME/XPME_Europe/` in
-  `scenery_packs.ini`), the improved pack is created **in the same folder** and registered with
-  its full path, so the texture references keep working.
-* XPME can re-order `scenery_packs.ini` when it starts. The `z_dem_…` pack must stay **above**
-  the XPME packages; if XPME moves it, disable XPME's automatic ordering or move the line up.
+* XPME keeps its packages outside X-Plane (absolute paths such as
+  `C:\Users\…\Documents\XPMapEnhancement\BasePack\XPME_Europe` in `scenery_packs.ini`) and
+  rewrites that block of the file when it starts. The improved pack therefore goes into
+  **Custom Scenery** and is listed **in front of** XPME's block; its `.ter` files reach XPME's
+  textures with relative paths (`../../../../Users/…/XPME_Europe/textures/…`). Only if XPME is on
+  another drive than X-Plane, the pack is placed next to XPME's packages instead.
+* Packs built by older versions inside XPME's folder are shown on step 1 as **"Needs a fix"**;
+  *Fix now* moves them into Custom Scenery (merging copies of the same name) and lists them
+  again. The next build of the same pack does this automatically.
 * After XPME updates its base packages, or after you flatten an airport in XPME, build the
   region again (the pack's `xp12dem_pack.json` records which source each tile came from).
 

@@ -31,6 +31,7 @@ class InstalledPack:
     built: str = ""
     enabled: bool = True  # listed (and not disabled) in scenery_packs.ini
     improves: list[str] = field(default_factory=list)  # packs whose terrain it re-heights
+    misplaced: bool = False  # stored outside Custom Scenery (e.g. in XPME's folder) - should move
 
     def describe(self) -> str:
         what = "improved terrain" if self.method == "improve" else "new mesh"
@@ -55,6 +56,10 @@ class Inventory:
     def inactive(self) -> list[InstalledPack]:
         """Packs that exist on disk but X-Plane does not load (not in scenery_packs.ini)."""
         return [p for p in self.packs if not p.enabled]
+
+    def needs_fix(self) -> list[InstalledPack]:
+        """Inactive packs, and packs in a folder another tool manages (XPME)."""
+        return [p for p in self.packs if not p.enabled or p.misplaced]
 
     def active_on(self, tile: Tile) -> bool:
         return any(p.enabled for p in self.installed.get(tile, []))
@@ -159,6 +164,12 @@ def installed_packs(xplane: Optional[Path], extra_roots: Iterable[Path] = ()) ->
             packs.append(pack)
     # one name in several places (e.g. an old copy in Custom Scenery): keep all, the
     # one scenery_packs.ini points to counts as active
+    if xplane is not None:
+        custom = xplane / "Custom Scenery"
+        mounted = [Path(r) for r in extra_roots]  # AutoOrtho storage: fine where it is
+        for pack in packs:
+            parent = pack.path.parent
+            pack.misplaced = not _same(parent, custom) and not any(_same(parent, m) for m in mounted)
     return sorted(packs, key=lambda p: (p.name.lower(), not p.enabled))
 
 

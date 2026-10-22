@@ -182,7 +182,15 @@ def install_pack(staged_pack: Path, target: InstallTarget, name: str,
     """Copy a staged pack into its final place (merging with an older build)."""
     dest = target.pack_dir(name)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    before = _read_json(dest / MANIFEST)
     shutil.copytree(staged_pack, dest, dirs_exist_ok=True)
+    if before:  # keep what earlier builds recorded about their tiles
+        new = _read_json(dest / MANIFEST)
+        for key in ("sources", "elevation_sources"):
+            new[key] = {**before.get(key, {}), **new.get(key, {})}
+        tiles = {tuple(t) for t in before.get("tiles", [])} | {tuple(t) for t in new.get("tiles", [])}
+        new["tiles"] = sorted([list(t) for t in tiles])
+        (dest / MANIFEST).write_text(json.dumps(new, indent=2), encoding="utf-8")
     update_scenery_packs_ini(target.custom_scenery, name, above, target.ini_entry(name))
     remember_install(dest)
     return dest
@@ -211,6 +219,51 @@ def remember_install(dest: Path) -> None:
         _registry_file().write_text(json.dumps(paths, indent=1), encoding="utf-8")
     except OSError:
         pass
+
+
+def relocate_pack(src: Path, dest: Path) -> Path:
+    """Move a pack to ``dest`` (merging with a pack already there) and keep the
+    texture references of its .ter files valid. Returns ``dest``."""
+    from .reheight import retarget_ter
+
+    src, dest = Path(src), Path(dest)
+    old_manifest = _read_json(src / MANIFEST)
+    dest_manifest = _read_json(dest / MANIFEST)
+    for path in sorted(src.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(src)
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if path.suffix.lower() == ".ter":
+            text = retarget_ter(path.read_text("utf-8", "replace"), path, target)
+            target.write_text(text, encoding="utf-8")
+        elif path.name != MANIFEST:
+            shutil.copy2(path, target)
+    merged = dict(dest_manifest)
+    merged.update({k: v for k, v in old_manifest.items() if k not in ("tiles", "sources", "elevation_sources")})
+    for key in ("sources", "elevation_sources"):
+        merged[key] = {**dest_manifest.get(key, {}), **old_manifest.get(key, {})}
+    tiles = {tuple(t) for t in dest_manifest.get("tiles", [])} | {tuple(t) for t in old_manifest.get("tiles", [])}
+    merged["tiles"] = sorted([list(t) for t in tiles])
+    if merged:
+        (dest / MANIFEST).write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    shutil.rmtree(src)
+    paths = [str(p) for p in known_install_paths() if p.exists()]
+    try:
+        _registry_file().write_text(json.dumps(paths, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+    remember_install(dest)
+    return dest
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
 def reactivate_pack(pack_dir: Path, xplane: Path, improves: Iterable[str] = ()) -> None:
@@ -260,7 +313,24 @@ def insert_pack_line(lines: list[str], name: str, above: Iterable[str] = (),
         insert_at = len(kept)
         while insert_at > 0 and not kept[insert_at - 1].strip():
             insert_at -= 1
+    elif not _is_absolute_line(entry) and _is_absolute_line(kept[insert_at]):
+        # Tools like XPME keep their packages as a block of absolute paths at the end of
+        # the file and rewrite that block on start: stay in front of the whole block.
+        while insert_at > 0 and _is_absolute_line(kept[insert_at - 1]):
+            insert_at -= 1
+        while insert_at > 0 and not kept[insert_at - 1].strip():
+            insert_at -= 1
     return kept[:insert_at] + [entry] + kept[insert_at:]
+
+
+def _is_absolute_line(line: str) -> bool:
+    from .reheight import is_absolute_entry
+
+    stripped = line.strip()
+    for key in ("SCENERY_PACK_DISABLED ", "SCENERY_PACK "):
+        if stripped.startswith(key):
+            return is_absolute_entry(stripped[len(key):].strip())
+    return False
 
 
 def _read_ini(custom_scenery: Path) -> tuple[list[str], str]:

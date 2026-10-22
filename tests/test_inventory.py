@@ -97,3 +97,55 @@ def test_pack_next_to_xpme_found_when_ini_lost_it(tmp_path):
     theirs = [i for i, l in enumerate(lines) if "XPME_Europe" in l]
     assert ours and ours[0] < theirs[0] and lines[ours[0]].endswith("BasePack/z_dem_my_region/")
     assert not inventory.scan(xp, tmp_path / "dem").inactive()
+
+
+def test_users_xpme_setup_is_detected_and_fixed(tmp_path):
+    """Reproduces a real setup: tiles in XPME's BasePack (entry dropped from the
+    ini), an old copy in Custom Scenery that the ini still lists."""
+    from xp12dem.installer import reactivate_pack, relocate_pack
+
+    xp = tmp_path / "X-Plane 12"
+    custom = xp / "Custom Scenery"
+    custom.mkdir(parents=True)
+    basepack = tmp_path / "Users" / "gerik" / "Documents" / "XPMapEnhancement" / "BasePack"
+    for name in ("XPME_Africa", "XPME_Europe", "XPME_North_America"):
+        (basepack / name).mkdir(parents=True)
+    _pack(custom, "z_dem_my_region", [(47, 11)], {"method": "improve", "sources": {"+47+011": "XPME_Europe"}})
+    xpme_pack = _pack(basepack, "z_dem_my_region", [(47, 10), (46, 11), (45, 11)],
+                      {"method": "improve", "sources": {"+47+010": "XPME_Europe"}})
+    (xpme_pack / "terrain").mkdir()
+    (xpme_pack / "terrain" / "t.ter").write_text("BASE_TEX ../../XPME_Europe/textures/t.dds\n")
+    bp = str(basepack).replace("/", "\\")  # XPME writes Windows style paths
+    (custom / "scenery_packs.ini").write_text(
+        "I\n1000 version\nSCENERY\n\n"
+        "SCENERY_PACK Custom Scenery/LOWI/\n"
+        "SCENERY_PACK *GLOBAL_AIRPORTS*\n"
+        "SCENERY_PACK Custom Scenery/z_dem_my_region/\n"
+        "SCENERY_PACK_DISABLED Custom Scenery/zOrtho4XP_+48+011/\n\n"
+        f"SCENERY_PACK {bp}/\n"
+        f"SCENERY_PACK {bp}\\XPME_Africa/\n"
+        f"SCENERY_PACK {bp}\\XPME_Europe/\n"
+        f"SCENERY_PACK {bp}\\XPME_North_America/\n", encoding="utf-8")
+
+    inv = inventory.scan(xp, tmp_path / "dem")
+    assert set(inv.installed) == {(47, 11), (47, 10), (46, 11), (45, 11)}  # all four found
+    fix = inv.needs_fix()
+    assert [p.path.parent for p in fix] == [basepack]  # the BasePack copy: not listed, misplaced
+    assert not fix[0].enabled and fix[0].misplaced
+
+    for pack in fix:  # what "Fix now" does
+        relocate_pack(pack.path, custom / pack.name)
+        reactivate_pack(custom / pack.name, xp, pack.improves)
+
+    inv = inventory.scan(xp, tmp_path / "dem")
+    assert not inv.needs_fix() and len(inv.packs) == 1
+    assert sorted(inv.packs[0].tiles) == [(45, 11), (46, 11), (47, 10), (47, 11)]
+    assert not (basepack / "z_dem_my_region").exists()
+    lines = (custom / "scenery_packs.ini").read_text().splitlines()
+    ours = lines.index("SCENERY_PACK Custom Scenery/z_dem_my_region/")
+    assert ours < next(i for i, l in enumerate(lines) if "XPMapEnhancement" in l)  # before XPME's block
+    assert lines[ours - 1].startswith("SCENERY_PACK_DISABLED Custom Scenery/zOrtho4XP") and lines[ours + 1] == ""
+    assert sum("z_dem_my_region" in l for l in lines) == 1
+    ref = (custom / "z_dem_my_region" / "terrain" / "t.ter").read_text().split()[1]
+    assert (custom / "z_dem_my_region" / "terrain" / ref).resolve() == \
+        (basepack / "XPME_Europe" / "textures" / "t.dds").resolve()
