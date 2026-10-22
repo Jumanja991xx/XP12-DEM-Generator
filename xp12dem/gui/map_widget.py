@@ -72,6 +72,7 @@ LEGEND = (
     (QColor(40, 120, 255), "■", "<b>Good</b> - national 5-50 m model, ArcticDEM"),
     (QColor(225, 55, 55), "■", "<b>Basic</b> - satellite 30 m (FABDEM)"),
     (COLOR_INSTALLED, "■", "<b>✓ Already installed</b>"),
+    (COLOR_INSTALLED, "▨", "<b>! Installed but not active</b> in X-Plane"),
     (COLOR_CACHED, "⬚", "Data downloaded, not built yet"),
 )
 # pixels the mouse may move before a left click becomes a drag (pan)
@@ -476,12 +477,18 @@ class TileMap(QGraphicsView):
         installed_pen.setCosmetic(True)
         fill = QColor(COLOR_INSTALLED)
         fill.setAlpha(190)
+        inactive_pen = QPen(COLOR_INSTALLED, 3)
+        inactive_pen.setStyle(Qt.DashLine)
+        inactive_pen.setCosmetic(True)
+        inactive_brush = QBrush(QColor(255, 140, 0, 200), Qt.BDiagPattern)
         for tile in inventory.installed:
-            item = self._scene.addRect(tile_rect(*tile).adjusted(1.5, 1.5, -1.5, -1.5), installed_pen,
-                                       QBrush(fill))
+            active = inventory.active_on(tile)
+            item = self._scene.addRect(tile_rect(*tile).adjusted(1.5, 1.5, -1.5, -1.5),
+                                       installed_pen if active else inactive_pen,
+                                       QBrush(fill) if active else inactive_brush)
             item.setZValue(3.2)  # below the selection outline
             self._inventory_items.append(item)
-            mark = QGraphicsSimpleTextItem("✓")
+            mark = QGraphicsSimpleTextItem("✓" if active else "!")
             mark.setFont(check_font)
             mark.setBrush(QBrush(QColor(255, 255, 255)))
             mark.setPen(QPen(QColor(90, 45, 0), 0.6))
@@ -514,7 +521,9 @@ class TileMap(QGraphicsView):
             parts.append("no data")
         packs = self._inventory.installed.get(tile)
         if packs:
-            parts.append("✔ installed in " + ", ".join(p.describe() for p in packs))
+            parts.append("✔ installed in " + ", ".join(
+                p.describe() + ("" if p.enabled else " - NOT ACTIVE (missing in scenery_packs.ini)")
+                for p in packs))
         else:
             parts.append("not installed yet")
         if tile in self._inventory.cached:

@@ -184,7 +184,41 @@ def install_pack(staged_pack: Path, target: InstallTarget, name: str,
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(staged_pack, dest, dirs_exist_ok=True)
     update_scenery_packs_ini(target.custom_scenery, name, above, target.ini_entry(name))
+    remember_install(dest)
     return dest
+
+
+# ---------------------------------------------------------------------------
+# Where packs were installed (so they are found even if scenery_packs.ini changed)
+# ---------------------------------------------------------------------------
+def _registry_file() -> Path:
+    from .paths import data_root
+
+    return data_root() / "installed_packs.json"
+
+
+def known_install_paths() -> list[Path]:
+    try:
+        return [Path(p) for p in json.loads(_registry_file().read_text("utf-8"))]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def remember_install(dest: Path) -> None:
+    paths = [str(p) for p in known_install_paths() if p.exists() and p != dest] + [str(dest)]
+    try:
+        _registry_file().parent.mkdir(parents=True, exist_ok=True)
+        _registry_file().write_text(json.dumps(paths, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def reactivate_pack(pack_dir: Path, xplane: Path, improves: Iterable[str] = ()) -> None:
+    """Put an existing pack (back) into scenery_packs.ini, above the packs it improves."""
+    custom = xplane / "Custom Scenery"
+    inside = pack_dir.parent.resolve() == custom.resolve()
+    entry = None if inside else f"{pack_dir.as_posix().rstrip('/')}/"
+    update_scenery_packs_ini(custom, pack_dir.name, improves, entry)
 
 
 def uninstall_pack(target: InstallTarget, name: str) -> None:

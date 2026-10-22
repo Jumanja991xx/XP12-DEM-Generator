@@ -371,6 +371,17 @@ class MainWindow(QMainWindow):
         self.installed_btn.clicked.connect(self._show_installed)
         have_row.addWidget(self.installed_btn)
         right_layout.addLayout(have_row)
+        inactive_row = QHBoxLayout()
+        self.inactive_label = QLabel("")
+        self.inactive_label.setTextFormat(Qt.RichText)
+        self.inactive_label.setWordWrap(True)
+        inactive_row.addWidget(self.inactive_label, 1)
+        self.activate_btn = QPushButton("Activate in X-Plane")
+        self.activate_btn.setObjectName("primary")
+        self.activate_btn.setToolTip("Add the packs to scenery_packs.ini again, above the scenery they improve")
+        self.activate_btn.clicked.connect(self._activate_inactive)
+        inactive_row.addWidget(self.activate_btn)
+        right_layout.addLayout(inactive_row)
         splitter.addWidget(right)
         splitter.setSizes([300, 860])
         layout.addWidget(splitter, 1)
@@ -472,6 +483,36 @@ class MainWindow(QMainWindow):
             self.have_label.setText(text)
         self.missing_btn.setEnabled(bool(tiles) and bool(installed) and bool(missing))
         self.installed_btn.setEnabled(bool(inv.installed))
+        inactive = inv.inactive()
+        self.inactive_label.setVisible(bool(inactive))
+        self.activate_btn.setVisible(bool(inactive))
+        if inactive:
+            self.inactive_label.setText(
+                "<span style='color:#ff9a1f'><b>⚠ Installed but not active:</b> "
+                + ", ".join(f"{p.name} ({len(p.tiles)} tiles)" for p in inactive)
+                + " - the folder exists, but scenery_packs.ini does not list it (XPME or another "
+                "tool may have rewritten the file), so X-Plane ignores it.</span>")
+
+    def _activate_inactive(self) -> None:
+        from ..installer import reactivate_pack
+
+        if self.xplane is None:
+            return
+        errors = []
+        for pack in self.inventory.inactive():
+            try:
+                reactivate_pack(pack.path, self.xplane, pack.improves)
+            except OSError as exc:
+                errors.append(f"{pack.name}: {exc}")
+        self._refresh_inventory()
+        if errors:
+            QMessageBox.warning(self, APP_NAME, "Could not update scenery_packs.ini:\n" + "\n".join(errors))
+        else:
+            QMessageBox.information(
+                self, APP_NAME, "Done - the packs are listed in scenery_packs.ini again (a backup is "
+                "stored as scenery_packs.ini.xp12dem.bak).\n\nIf they disappear again after starting "
+                "XPME, XPME rewrites the file on start - activate them again after XPME has started, "
+                "before launching X-Plane.")
 
     def _select_missing(self) -> None:
         self.map.set_selected(self.inventory.missing(self.map.selected()), focus=False)

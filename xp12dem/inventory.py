@@ -29,7 +29,8 @@ class InstalledPack:
     tiles: list[Tile]
     elevation_sources: dict[str, str] = field(default_factory=dict)
     built: str = ""
-    enabled: bool = True
+    enabled: bool = True  # listed (and not disabled) in scenery_packs.ini
+    improves: list[str] = field(default_factory=list)  # packs whose terrain it re-heights
 
     def describe(self) -> str:
         what = "improved terrain" if self.method == "improve" else "new mesh"
@@ -50,6 +51,13 @@ class Inventory:
 
     def missing(self, tiles: Iterable[Tile]) -> list[Tile]:
         return sorted(t for t in tiles if t not in self.installed)
+
+    def inactive(self) -> list[InstalledPack]:
+        """Packs that exist on disk but X-Plane does not load (not in scenery_packs.ini)."""
+        return [p for p in self.packs if not p.enabled]
+
+    def active_on(self, tile: Tile) -> bool:
+        return any(p.enabled for p in self.installed.get(tile, []))
 
 
 def _is_dem_pack(name: str) -> bool:
@@ -84,16 +92,19 @@ def read_pack(path: Path, enabled: bool = True) -> Optional[InstalledPack]:
         return None
     method = manifest.get("method") or ("improve" if path.name.lower().startswith(IMPROVE_PREFIX)
                                         else "rebuild")
+    improves = sorted(set(manifest.get("sources", {}).values())) if isinstance(manifest.get("sources"), dict) else []
     return InstalledPack(name=path.name, path=path, method=method,
                          resolution=manifest.get("resolution", ""), tiles=sorted(present),
                          elevation_sources=dict(manifest.get("elevation_sources", {})),
-                         built=manifest.get("built", ""), enabled=enabled)
+                         built=manifest.get("built", ""), enabled=enabled,
+                         improves=[i for i in improves if not i.startswith("X-Plane 12 Global")])
 
 
 def installed_packs(xplane: Optional[Path], extra_roots: Iterable[Path] = ()) -> list[InstalledPack]:
     """All packs made by this app: listed in scenery_packs.ini (also absolute
     paths, e.g. next to XPME) or lying in Custom Scenery / AutoOrtho's folder."""
-    from .reheight import pack_entries, resolve_pack
+    from .installer import known_install_paths
+    from .reheight import is_absolute_entry, pack_entries, resolve_pack
 
     found: dict[str, tuple[Path, bool]] = {}
     listed: set[str] = set()  # pack names enabled in scenery_packs.ini
@@ -105,7 +116,13 @@ def installed_packs(xplane: Optional[Path], extra_roots: Iterable[Path] = ()) ->
                 listed.add(name.lower())
                 path = resolve_pack(xplane, raw)
                 found[str(path).lower()] = (path, True)
+            elif is_absolute_entry(raw):
+                # packages stored outside X-Plane (XPME): our packs sit next to them
+                roots.append(resolve_pack(xplane, raw).parent)
         roots.insert(0, custom)
+    for known in known_install_paths():  # remembered installs, wherever they are
+        roots.append(known.parent)
+    roots = list(dict.fromkeys(roots))
     for root in roots:
         try:
             children = list(Path(root).iterdir())
