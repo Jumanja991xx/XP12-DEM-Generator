@@ -97,3 +97,24 @@ def delete_packs(packs: Iterable[InstalledPack], xplane: Optional[Path]) -> list
             except OSError as exc:
                 errors.append(f"scenery_packs.ini: {exc}")
     return errors
+
+
+def remove_tiles_from_packs(packs: Iterable[InstalledPack], tiles: Iterable, xplane: Optional[Path]) -> list[str]:
+    """Take tiles out of this app's packs, so X-Plane uses the scenery below again
+    (XPME, AutoOrtho, default). A pack left without tiles is removed completely."""
+    from .inventory import remove_tiles
+
+    wanted = {tuple(t) for t in tiles}
+    errors: list[str] = []
+    for pack in packs:
+        hit = [t for t in pack.tiles if tuple(t) in wanted]
+        if not hit:
+            continue
+        try:
+            remove_tiles(pack, hit)
+        except OSError as exc:
+            errors.append(f"{pack.name}: {exc}")
+            continue
+        if not any(pack.path.glob("Earth nav data/*/*.dsf")):
+            errors += delete_packs([pack], xplane)
+    return errors

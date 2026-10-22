@@ -374,6 +374,11 @@ class MainWindow(QMainWindow):
         self.installed_btn = QPushButton("Show my installed tiles")
         self.installed_btn.clicked.connect(self._show_installed)
         have_row.addWidget(self.installed_btn)
+        self.remove_btn = QPushButton("Remove selected from X-Plane…")
+        self.remove_btn.setToolTip("Take the selected tiles out of this app's packs - X-Plane then "
+                                   "shows XPME / AutoOrtho / the default scenery there again")
+        self.remove_btn.clicked.connect(self._remove_selected)
+        have_row.addWidget(self.remove_btn)
         right_layout.addLayout(have_row)
         inactive_row = QHBoxLayout()
         self.inactive_label = QLabel("")
@@ -556,6 +561,38 @@ class MainWindow(QMainWindow):
 
     def _select_missing(self) -> None:
         self.map.set_selected(self.inventory.missing(self.map.selected()), focus=False)
+
+    def _remove_selected(self) -> None:
+        """Undo this app's work for the selected tiles only."""
+        from ..cleanup import remove_tiles_from_packs
+
+        if self.thread is not None and self.thread.isRunning():
+            QMessageBox.information(self, APP_NAME, "Please wait until the build has finished.")
+            return
+        self._refresh_inventory()
+        tiles = [t for t in self.map.selected() if t in self.inventory.installed]
+        if not tiles:
+            QMessageBox.information(self, APP_NAME, "None of the selected tiles is installed by this "
+                                    "app. Select installed (orange ✓) tiles on the map first.")
+            return
+        packs = sorted({p.name for t in tiles for p in self.inventory.installed[t]})
+        names = ", ".join(regions.tile_name(*t) for t in tiles[:12]) + (" …" if len(tiles) > 12 else "")
+        answer = QMessageBox.question(
+            self, APP_NAME,
+            f"Remove {len(tiles)} tile(s) ({names}) from {', '.join(packs)}?\n\n"
+            "X-Plane then shows the scenery below again (XPME, AutoOrtho or the default terrain). "
+            "Other tiles, XPME and your downloaded elevation data are not touched - you can build "
+            "these tiles again at any time.")
+        if answer != QMessageBox.Yes:
+            return
+        affected = {id(p): p for t in tiles for p in self.inventory.installed[t]}.values()
+        errors = remove_tiles_from_packs(affected, tiles, self.xplane)
+        self._refresh_inventory()
+        if errors:
+            QMessageBox.warning(self, APP_NAME, "Could not remove everything:\n" + "\n".join(errors))
+        else:
+            QMessageBox.information(self, APP_NAME, f"Done - {len(tiles)} tile(s) removed. Restart "
+                                    "X-Plane (or reload the scenery) to see the original terrain.")
 
     def _show_installed(self) -> None:
         self.map.focus_tiles(self.inventory.installed)
