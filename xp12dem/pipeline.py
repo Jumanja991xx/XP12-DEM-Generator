@@ -21,7 +21,7 @@ from typing import Optional
 from . import paths
 from .dem import Cancelled, DemStore, resolution
 from .eta import DEFAULT_BUILD, Estimator, TimingHistory, build_key
-from .installer import IMPROVE_PREFIX, InstallTarget, assemble_pack, install_pack, pack_name
+from .installer import IMPROVE_PREFIX, MESH_PREFIX, InstallTarget, assemble_pack, install_pack, pack_name
 from .o4x_worker import PROGRESS_PREFIX
 from .regions import Tile, tile_name
 
@@ -322,8 +322,11 @@ class Pipeline:
                 # a fresh build must also win over older LiDAR packs for the same tiles
                 from .reheight import enabled_packs
 
+                # a fresh build must also win over older LiDAR packs for the same tiles -
+                # but a new mesh (z_dem_mesh_*) always stays above re-heighted terrain
                 above |= {p for p in enabled_packs(req.xplane / "Custom Scenery")
-                          if p.lower().startswith(IMPROVE_PREFIX) and p != req.pack}
+                          if p.lower().startswith(IMPROVE_PREFIX) and p != req.pack
+                          and (not improve or not p.lower().startswith(MESH_PREFIX))}
             if improve:
                 self._move_old_copies(target, req.pack)
             result.installed_to = install_pack(staged, target, req.pack, above)

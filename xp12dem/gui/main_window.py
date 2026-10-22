@@ -507,7 +507,8 @@ class MainWindow(QMainWindow):
                                "rewrites scenery_packs.ini")
                 if p.overridden_by:
                     why.append(f"listed below {p.overridden_by} in scenery_packs.ini, so X-Plane uses "
-                               f"{p.overridden_by}'s terrain instead (XPME may have re-sorted the file)")
+                               f"{p.overridden_by}'s terrain instead (XPME may have re-sorted the file, "
+                               "or a later build was placed above it)")
                 if p.broken:
                     names = ", ".join(regions.tile_name(*t) for t in sorted(p.broken)[:6])
                     more = f" … (+{len(p.broken) - 6})" if len(p.broken) > 6 else ""
@@ -542,7 +543,8 @@ class MainWindow(QMainWindow):
                 if pack.misplaced and pack.path.exists():
                     relocate_pack(pack.path, target)
                     moved.append(f"{pack.name}: {pack.path.parent} → Custom Scenery")
-                reactivate_pack(target if pack.misplaced else pack.path, self.xplane, pack.improves)
+                above = pack.improves + ([pack.overridden_by] if pack.overridden_by else [])
+                reactivate_pack(target if pack.misplaced else pack.path, self.xplane, above)
             except OSError as exc:
                 errors.append(f"{pack.name}: {exc}")
         self._refresh_inventory()

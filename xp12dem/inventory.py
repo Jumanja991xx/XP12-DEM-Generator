@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from .dem import SOURCE_LABELS
-from .installer import IMPROVE_PREFIX, MANIFEST, PACK_PREFIX
+from .installer import IMPROVE_PREFIX, MANIFEST, MESH_PREFIX, PACK_PREFIX
 from .regions import Tile, parse_tile
 
 _HGT = re.compile(r"^([NS])(\d{2})([EW])(\d{3})\.hgt$", re.IGNORECASE)
@@ -211,6 +211,11 @@ def installed_packs(xplane: Optional[Path], extra_roots: Iterable[Path] = ()) ->
             if pack.enabled and pack.name.lower() in order:
                 mine = order.index(pack.name.lower())
                 above = [i for i in pack.improves if i.lower() in order and order.index(i.lower()) < mine]
+                if not above and pack.name.lower().startswith(MESH_PREFIX):
+                    # a new mesh hidden by re-heighted terrain of the same tiles listed above it
+                    above = [o.name for o in packs if o is not pack and o.enabled and o.method == "improve"
+                             and o.name.lower() in order and order.index(o.name.lower()) < mine
+                             and set(o.tiles) & set(pack.tiles)]
                 pack.overridden_by = above[0] if above else ""
     return sorted(packs, key=lambda p: (p.name.lower(), not p.enabled))
 

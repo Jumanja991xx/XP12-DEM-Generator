@@ -172,3 +172,31 @@ def test_pack_listed_below_the_scenery_it_improves(tmp_path):
     reactivate_pack(pack.path, xp, pack.improves)  # what "Fix now" does
     inv = inventory.scan(xp, tmp_path / "dem")
     assert not inv.needs_fix() and inv.active_on((47, 18))
+
+
+def test_new_mesh_hidden_by_improved_terrain_is_detected_and_fixed(tmp_path):
+    import json
+
+    from xp12dem import installer
+
+    xp = tmp_path / "X-Plane 12"
+    custom = xp / "Custom Scenery"
+    for name, method in (("z_dem_my_region", "improve"), ("z_dem_mesh_my_region", "rebuild")):
+        dsf = custom / name / "Earth nav data" / "+40+010"
+        dsf.mkdir(parents=True)
+        (dsf / "+47+011.dsf").write_bytes(b"x")
+        (custom / name / installer.MANIFEST).write_text(
+            json.dumps({"method": method, "sources": {"+47+011": "XPME_Europe"}}), encoding="utf-8")
+    xpme = tmp_path / "XPME_Europe"
+    (custom / "scenery_packs.ini").write_text(
+        "I\n1000 Version\nSCENERY\n\nSCENERY_PACK Custom Scenery/z_dem_my_region/\n"
+        "SCENERY_PACK Custom Scenery/z_dem_mesh_my_region/\n"
+        f"SCENERY_PACK {xpme.as_posix()}/\n", encoding="utf-8")
+    mesh = inventory.scan(xp, tmp_path / "dem").pack("z_dem_mesh_my_region")
+    assert mesh.overridden_by == "z_dem_my_region"
+
+    installer.reactivate_pack(mesh.path, xp, mesh.improves + [mesh.overridden_by])
+    lines = (custom / "scenery_packs.ini").read_text().splitlines()
+    assert lines.index("SCENERY_PACK Custom Scenery/z_dem_mesh_my_region/") < \
+        lines.index("SCENERY_PACK Custom Scenery/z_dem_my_region/")
+    assert inventory.scan(xp, tmp_path / "dem").pack("z_dem_mesh_my_region").overridden_by == ""
