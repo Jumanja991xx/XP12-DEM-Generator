@@ -1308,9 +1308,13 @@ class MainWindow(QMainWindow):
             fine = sum(1 for t in tiles if (coverage().get(t) and coverage()[t].fine))
             own = (" (plus tiles covered by your own 1-10 m files)"
                    if hasattr(self, "dem_folder_edit") and self.dem_folder_edit.text().strip() else "")
-            self.fine_label.setText(
-                f"10 m data available for <b>{fine} of {len(tiles)}</b> selected tile(s){own}."
-                if tiles else "")
+            text = (f"10 m data available for <b>{fine} of {len(tiles)}</b> selected tile(s){own}."
+                    if tiles else "")
+            if tiles and hasattr(self, "method_cards") and self._method_key() == "improve":
+                text += (" <span style='color:#f0c040'>Note: <i>Improve</i> keeps the points of your "
+                         "current mesh (often 50-100 m apart) and only corrects their heights, so "
+                         "10 m data adds little - it pays off with a new mesh.</span>")
+            self.fine_label.setText(text)
         if not hasattr(self, "mesh_cards") or not hasattr(self, "parallel_combo"):
             return
         minutes = self._minutes(len(tiles))

@@ -589,12 +589,25 @@ def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: Mes
 
     # Copy local terrain definitions so their textures point back to the source pack.
     if source.kind == "pack":
+        import time as _time
+
         unreadable = []
-        for name in defs:
-            if name.startswith(LIB_PREFIXES) or name.lower() in WATER_DEFS:
-                continue
-            text = read_text_retry(source.read_root / name)
+        local = [d for d in defs if not d.startswith(LIB_PREFIXES) and d.lower() not in WATER_DEFS]
+        log(f"   copying {len(local)} terrain definitions from {source.name}")
+        waited, started = 0.0, _time.monotonic()
+        for index, name in enumerate(local, 1):
+            # a virtual drive may need a moment for the first files; never wait more than
+            # ~20 s in total, so a missing file cannot stall the build
+            attempts = 5 if waited < 20 else 1
+            t0 = _time.monotonic()
+            text = read_text_retry(source.read_root / name, attempts=attempts)
+            waited += _time.monotonic() - t0 if text is None else 0.0
+            if index % 100 == 0:
+                log(f"   {index} of {len(local)} terrain definitions copied "
+                    f"({_time.monotonic() - started:.0f} s)")
             if text is None:
+                if not unreadable:
+                    log(f"   {source.name} does not provide {name}")
                 unreadable.append(name)
                 continue
             dst = out_pack / name

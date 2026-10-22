@@ -138,7 +138,10 @@ class Estimator:
                     expected = max(expected - (now - self.downloading[1]), expected * 0.1)
                 download += expected
             per_build = self.per_tile_build()
-            running = sum(max(per_build - (now - begun), per_build * 0.04)
+            # a tile taking longer than usual: keep a growing, honest estimate instead of
+            # a fixed "few seconds left"
+            running = sum(max(per_build - (now - begun), 0.0) + per_build * 0.04
+                          + max(0.0, (now - begun) - per_build) * 0.25
                           for begun in self.running.values())
             work = running + len(self.pending_build) * per_build
             slots = min(self.workers, max(1, len(self.running) + len(self.pending_build)))
