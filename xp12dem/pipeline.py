@@ -562,6 +562,11 @@ class Pipeline:
                     if kind == "step":
                         self.events.log(f"{name}: [{event['index'] + 1}/{event['total']}] {event['label']}")
                         self.events.tile_state(tile, f"step:{event['step']}")
+                    elif kind == "bar":
+                        # Ortho4XP's progress bar for long sub steps: report every quarter
+                        value = int(event.get("value", 0))
+                        if value in (25, 50, 75):
+                            self.events.log(f"{name}:     {value} %")
                     elif kind == "step_done":
                         self.events.log(f"{name}:   done in {event['seconds']} s")
                     elif kind == "log":

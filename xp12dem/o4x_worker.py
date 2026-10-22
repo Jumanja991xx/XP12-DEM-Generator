@@ -263,6 +263,8 @@ def run_job(job: dict) -> int:
         text = " ".join(str(a) for a in args).strip()
         if min_verbosity == 0 and text.startswith("->"):
             emit("log", message=text[2:].strip())
+        elif min_verbosity == 1 and text.startswith("*"):  # sub steps ("* Encoding coastline.")
+            emit("log", message="  " + text[1:].strip())
 
     UI.vprint = vprint
     OVL.custom_overlay_src = prepare_global_dsf(job.get("global_scenery", ""), lat, lon,
