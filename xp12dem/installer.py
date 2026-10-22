@@ -16,6 +16,7 @@ from .xplane import AutoOrthoConfig
 
 PACK_PREFIX = "z_ao_dem_"  # new Ortho4XP mesh, lives in AutoOrtho's scenery folder
 IMPROVE_PREFIX = "z_dem_"  # re-heighted copy of the mesh the user already has
+MESH_PREFIX = "z_dem_mesh_"  # new Ortho4XP mesh using XPME's photos, lives in Custom Scenery
 MANIFEST = "xp12dem_pack.json"
 INI_NAME = "scenery_packs.ini"
 INI_BACKUP_SUFFIX = ".xp12dem.bak"
@@ -24,8 +25,10 @@ INI_BACKUP_SUFFIX = ".xp12dem.bak"
 _MESH_PACK_PREFIXES = ("z_ao_", "z_autoortho", "zortho4xp_", "z_ortho", "zzz")
 
 
-def pack_name(slug: str, method: str = "rebuild") -> str:
-    return (IMPROVE_PREFIX if method == "improve" else PACK_PREFIX) + slug
+def pack_name(slug: str, method: str = "rebuild", photos: str = "autoortho") -> str:
+    if method == "improve":
+        return IMPROVE_PREFIX + slug
+    return (MESH_PREFIX if photos == "xpme" else PACK_PREFIX) + slug
 
 
 @dataclass

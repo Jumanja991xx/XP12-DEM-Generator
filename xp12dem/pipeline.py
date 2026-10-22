@@ -70,11 +70,12 @@ class BuildRequest:
     install: bool = True
     keep_work_files: bool = False
     method: str = "improve"  # "improve" existing terrain, or "rebuild" with Ortho4XP
+    photos: str = "autoortho"  # new mesh: photos streamed by "autoortho", or XPME's ("xpme")
     extra_roots: list[Path] = field(default_factory=list)  # e.g. AutoOrtho's real scenery dir
 
     @property
     def pack(self) -> str:
-        return pack_name(self.slug, self.method)
+        return pack_name(self.slug, self.method, self.photos)
 
 
 class Events:
@@ -236,6 +237,7 @@ class Pipeline:
         tile_dirs: dict[Tile, Path] = {}
         todo = [t for t in tiles if t in dem_files]
         sources: dict[Tile, "reheight.MeshSource"] = {}
+        photo_packs: dict[Tile, tuple[str, Path]] = {}
         runways: dict[Tile, list] = {}
         if req.method == "improve":
             self.events.stage("Finding the terrain you currently use")
@@ -248,6 +250,14 @@ class Pipeline:
             self.events.stage("Applying LiDAR heights to your terrain")
         else:
             target = req.target
+            if req.photos == "xpme":
+                self.events.stage("Finding XPME's photos")
+                photo_packs = self._photo_packs(todo, result)
+                for tile in [t for t in todo if t not in photo_packs]:
+                    eta.skip(tile)
+                todo = [t for t in todo if t in photo_packs]
+                target = InstallTarget.for_custom_scenery(req.xplane)
+                self._install_dir = target.pack_dir(req.pack)
             self.events.stage("Building terrain meshes with Ortho4XP")
         selected = set(tiles)
         workers = max(1, min(req.parallel, len(todo) or 1))
@@ -284,6 +294,10 @@ class Pipeline:
             self.events.log("No tile could be built - nothing to install.")
             return self._finish(result, started)
 
+        for tile, build_dir in tile_dirs.items():
+            if tile in photo_packs:
+                self._use_photos(tile, build_dir, photo_packs[tile])
+
         # 3. Pack + install ---------------------------------------------------
         self.events.stage("Assembling scenery pack")
         if staged.exists():
@@ -292,12 +306,14 @@ class Pipeline:
         assemble_pack(tile_dirs, staged, region_name=req.region_name,
                       resolution_label=res.label,
                       mesh_label="unchanged (existing mesh)" if improve else detail.label,
-                      sources={t: sources[t].label for t in tile_dirs} if improve else None,
+                      sources=({t: sources[t].label for t in tile_dirs} if improve else
+                               {t: photo_packs[t][0] for t in tile_dirs} if photo_packs else None),
                       dem_sources={t: self.dem_sources.get(t, "") for t in tile_dirs})
         if req.install:
             self.events.stage("Installing into X-Plane 12")
             above = {src.name for t, src in sources.items() if t in tile_dirs and src.kind == "pack"}
-            if improve:
+            above |= {photo_packs[t][0] for t in tile_dirs if t in photo_packs}
+            if improve or photo_packs:
                 # a fresh build must also win over older LiDAR packs for the same tiles
                 from .reheight import enabled_packs
 
@@ -394,6 +410,42 @@ class Pipeline:
         count = sum(len(v) for v in runways.values())
         self.events.log(f"{count} runway(s) found - their surroundings keep the original heights")
         return sources, runways
+
+    def _photo_packs(self, tiles: list[Tile], result: BuildResult) -> dict:
+        """The XPME package whose photos each tile's new mesh will use."""
+        from . import reheight as RH
+
+        found = {}
+        for tile in tiles:
+            pack = RH.find_photo_pack(tile, self.req.xplane)
+            if pack is None:
+                message = ("no XPME package with photos for this tile found in scenery_packs.ini - "
+                           "start XPME (and let it finish loading), or use 'Improve my current terrain'")
+                result.failed_tiles[tile] = message
+                self.events.log(f"ERROR {tile_name(*tile)}: {message}")
+                self.events.tile_state(tile, "failed")
+                continue
+            found[tile] = pack
+            self.events.log(f"{tile_name(*tile)}: photos from {pack[0]}")
+        return found
+
+    def _use_photos(self, tile: Tile, build_dir: Path, pack: tuple[str, Path]) -> None:
+        """Point the new tile's terrain files at XPME's photos."""
+        from .reheight import point_ter_at_photos
+
+        name, folder = pack
+        textures = folder / "textures"
+        ter_dir = (self._install_dir or build_dir) / "terrain"
+        photos: list[str] = []
+        for ter in (build_dir / "terrain").glob("*.ter"):
+            text, used = point_ter_at_photos(ter.read_text("utf-8", "replace"), textures, ter_dir)
+            ter.write_text(text, encoding="utf-8")
+            photos += used
+        missing = [p for p in dict.fromkeys(photos[:400:40]) if not (textures / p).is_file()]
+        if missing:
+            self.events.log(f"{tile_name(*tile)}: warning - {name} does not provide {missing[0]} "
+                            f"({len(missing)} of the checked photos missing)")
+        self.events.log(f"{tile_name(*tile)}: uses {len(set(photos))} photos from {name}")
 
     def _improve_target(self, sources: dict, result: BuildResult) -> InstallTarget:
         """Where the improved pack goes: always Custom Scenery.

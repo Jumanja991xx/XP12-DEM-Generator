@@ -138,6 +138,38 @@ def test_insert_pack_line_above_source():
 def test_pack_names_per_method():
     assert installer.pack_name("alps", "improve") == "z_dem_alps"
     assert installer.pack_name("alps", "rebuild") == "z_ao_dem_alps"
+    assert installer.pack_name("alps", "rebuild", "xpme") == "z_dem_mesh_alps"
+
+
+def test_new_mesh_uses_xpme_photos(tmp_path):
+    ter = ("A\n800\nTERRAIN\n\nLOAD_CENTER 47.1 11.2 2400 4096\n"
+           "BASE_TEX_NOWRAP ../textures/22784_34864_BI16.dds\n"
+           "LOAD_CENTER_BORDER 47.1 11.2 2400 512\n"
+           "BORDER_TEX ../textures/22784_34864_BI16.png\n")
+    xpme = tmp_path / "Documents" / "XPMapEnhancement" / "BasePack" / "XPME_Europe"
+    install = tmp_path / "X-Plane 12" / "Custom Scenery" / "z_dem_mesh_tyrol"
+    text, used = RH.point_ter_at_photos(ter, xpme / "textures", install / "terrain")
+    assert used == ["22784_34864_BI16.dds"]
+    assert ("BASE_TEX_NOWRAP ../../../../Documents/XPMapEnhancement/BasePack/XPME_Europe/"
+            "textures/22784_34864_BI16.dds") in text
+    assert "BORDER_TEX ../textures/22784_34864_BI16.png" in text  # water masks stay ours
+
+
+def test_find_photo_pack_picks_xpme_with_the_tile(tmp_path):
+    xplane = tmp_path / "X-Plane 12"
+    custom = xplane / "Custom Scenery"
+    custom.mkdir(parents=True)
+    docs = tmp_path / "XPME"
+    for name in ("XPME_Africa", "XPME_Europe"):
+        (docs / name / "Earth nav data" / "+40+010").mkdir(parents=True)
+    (docs / "XPME_Europe" / "Earth nav data" / "+40+010" / "+47+011.dsf").write_bytes(b"x")
+    (custom / "scenery_packs.ini").write_text(
+        "I\n1000 Version\nSCENERY\n\n"
+        f"SCENERY_PACK {(docs / 'XPME_Africa').as_posix()}/\n"
+        f"SCENERY_PACK {(docs / 'XPME_Europe').as_posix()}/\n", encoding="utf-8")
+    name, folder = RH.find_photo_pack((47, 11), xplane)
+    assert name == "XPME_Europe" and folder == docs / "XPME_Europe"
+    assert RH.find_photo_pack((10, 11), xplane) is None
 
 
 def test_find_source_never_chains_improved_packs(tmp_path):

@@ -493,6 +493,37 @@ def retarget_ter(text: str, old_ter: Path, new_ter: Path) -> str:
     return "\n".join(out) + "\n"
 
 
+_PHOTO_LINE = re.compile(r"^(BASE_TEX(?:_NOWRAP)?)\s+\.\./textures/([^/\\]+\.dds)\s*$", re.IGNORECASE)
+
+
+def find_photo_pack(tile: Tile, xplane: Path) -> Optional[tuple[str, Path]]:
+    """The XPME package that provides photos for ``tile``: an enabled
+    scenery_packs.ini entry named XPME_* that has the tile's DSF."""
+    for name, raw in pack_entries(xplane / "Custom Scenery"):
+        if not name.lower().startswith("xpme"):
+            continue
+        folder = resolve_pack(xplane, raw)
+        try:
+            if (folder / dsf_relpath(*tile)).is_file():
+                return name, folder
+        except OSError:
+            continue
+    return None
+
+
+def point_ter_at_photos(text: str, textures_dir: Path, ter_dir: Path) -> tuple[str, list[str]]:
+    """Make an Ortho4XP .ter use photos from another pack (XPME) instead of
+    ``../textures``. Masks (PNG) stay local. Returns the text and the photos used."""
+    out, used = [], []
+    for line in text.splitlines():
+        match = _PHOTO_LINE.match(line.strip())
+        if match:
+            used.append(match[2])
+            line = f"{match[1]} {relative_ref(Path(textures_dir) / match[2], ter_dir)}"
+        out.append(line)
+    return "\n".join(out) + "\n", used
+
+
 def _is_water_text(text: str) -> bool:
     return any(line.strip() == "WET" for line in text.splitlines())
 

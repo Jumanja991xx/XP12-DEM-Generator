@@ -32,9 +32,9 @@ METHODS = (
     ("improve", "Improve my current terrain (recommended)",
      "Works with XPME, AutoOrtho, Ortho4XP packs and X-Plane's default scenery. Keeps your "
      "textures, water and roads and replaces only the heights with LiDAR data."),
-    ("rebuild", "Build a new, denser mesh (AutoOrtho only)",
-     "Ortho4XP builds a completely new mesh from the LiDAR data. Sharpest result, but the "
-     "photos must come from AutoOrtho."),
+    ("rebuild", "Build a new, denser mesh",
+     "Ortho4XP builds a completely new mesh from the LiDAR data - the sharpest result, "
+     "every ridge and gully of the fine data. The photos come from XPME or AutoOrtho."),
 )
 CUSTOM_KEY = "__custom__"
 
@@ -776,13 +776,13 @@ class MainWindow(QMainWindow):
         xp_row.addWidget(change)
         target_layout.addLayout(xp_row)
         self.target_group = QButtonGroup(self)
+        self.target_xpme = QRadioButton()
         self.target_ao = QRadioButton()
-        self.target_cs = QRadioButton("X-Plane 'Custom Scenery' folder directly")
-        self.target_group.addButton(self.target_ao)
-        self.target_group.addButton(self.target_cs)
-        self.target_ao.toggled.connect(lambda *_: self._refresh_summary())
-        target_layout.addWidget(self.target_ao)
-        target_layout.addWidget(self.target_cs)
+        self.target_cs = QRadioButton("Custom Scenery, photos from AutoOrtho (AutoOrtho must run)")
+        for button in (self.target_xpme, self.target_ao, self.target_cs):
+            self.target_group.addButton(button)
+            button.toggled.connect(lambda *_: self._refresh_summary())
+            target_layout.addWidget(button)
         self.target_hint = _hint("")
         self.target_hint.setTextFormat(Qt.RichText)
         self.target_hint.setMinimumHeight(56)
@@ -858,12 +858,28 @@ class MainWindow(QMainWindow):
             return None
         if self._method_key() == "improve":
             return InstallTarget.for_custom_scenery(self.xplane)
+        if self.target_xpme.isChecked():
+            return InstallTarget.for_custom_scenery(self.xplane) if self._xpme_packs() else None
         if self.target_ao.isChecked():
             ao = read_autoortho_config()
             if ao and ao.ao_scenery_dir:
                 return InstallTarget.for_autoortho(ao, self.xplane)
             return None
         return InstallTarget.for_custom_scenery(self.xplane)
+
+    def _photos(self) -> str:
+        return "xpme" if self._method_key() == "rebuild" and self.target_xpme.isChecked() else "autoortho"
+
+    def _xpme_packs(self) -> list[str]:
+        """XPME packages listed in scenery_packs.ini (they provide the photos)."""
+        if self.xplane is None:
+            return []
+        from ..reheight import enabled_packs
+
+        try:
+            return [p for p in enabled_packs(self.xplane / "Custom Scenery") if p.lower().startswith("xpme")]
+        except OSError:
+            return []
 
     def _refresh_summary(self) -> None:
         tiles = self.map.selected()
@@ -879,7 +895,7 @@ class MainWindow(QMainWindow):
         mesh_text = ("Mesh: your current terrain, LiDAR heights" if method == "improve"
                      else f"Mesh: new Ortho4XP mesh ({detail.label})")
         self.summary_label.setText(
-            f"<b>{name}</b> &nbsp;→ scenery pack <code>{pack_name(slug, method)}</code><br>"
+            f"<b>{name}</b> &nbsp;→ scenery pack <code>{pack_name(slug, method, self._photos())}</code><br>"
             f"{self._quality_summary(tiles)}<br>"
             f"{len(tiles)} tile(s): {regions.bounds(tiles)} &nbsp;·&nbsp; "
             f"DEM: {res.label} &nbsp;·&nbsp; {mesh_text}<br>"
@@ -893,20 +909,37 @@ class MainWindow(QMainWindow):
         improve = method == "improve"
         self.target_ao.setVisible(not improve)
         self.target_cs.setVisible(not improve)
+        self.target_xpme.setVisible(not improve)
         if improve:
             self.target_hint.setText(self._sources_preview(tiles))
             target_ok = self._target() is not None
             busy = self.thread is not None and self.thread.isRunning()
             self.create_btn.setEnabled(bool(tiles) and target_ok and not busy)
             return
+        xpme = self._xpme_packs()
+        if xpme:
+            self.target_xpme.setText(f"Custom Scenery, photos from XPME ({', '.join(xpme)})")
+            self.target_xpme.setEnabled(True)
+        else:
+            self.target_xpme.setText("Photos from XPME (not found - start XPME so it adds its "
+                                     "packages to scenery_packs.ini)")
+            self.target_xpme.setEnabled(False)
         if ao and ao.ao_scenery_dir:
-            self.target_ao.setText(f"AutoOrtho (recommended) - {ao.ao_scenery_dir}")
+            self.target_ao.setText(f"AutoOrtho's scenery folder - {ao.ao_scenery_dir}")
             self.target_ao.setEnabled(True)
         else:
             self.target_ao.setText("AutoOrtho (not found - start AutoOrtho once and set its paths)")
             self.target_ao.setEnabled(False)
-            self.target_cs.setChecked(True)
-        if self.target_ao.isChecked():
+        if not self.target_group.checkedButton() or not self.target_group.checkedButton().isEnabled():
+            (self.target_xpme if xpme else self.target_ao if self.target_ao.isEnabled()
+             else self.target_cs).setChecked(True)
+        if self.target_xpme.isChecked():
+            self.target_hint.setText(
+                "A new mesh from the LiDAR data, with XPME's photos on it. The pack goes into "
+                "Custom Scenery above XPME's packages, which stay installed: <b>XPME must be "
+                "running</b> while you fly, it delivers the photos. Water, roads and objects come "
+                "from OpenStreetMap / X-Plane, not from XPME.")
+        elif self.target_ao.isChecked():
             self.target_hint.setText(
                 "The pack is placed next to AutoOrtho's own packs and appears in Custom Scenery "
                 "as soon as AutoOrtho is (re)started. It is listed above z_ao_* in "
@@ -1030,7 +1063,7 @@ class MainWindow(QMainWindow):
             resolution_key=self._res_key(), mesh_key=self._mesh_key(), xplane=self.xplane,
             target=target,
             local_dem_source=Path(self.dem_folder_edit.text()) if self.dem_folder_edit.text().strip() else None,
-            parallel=self._parallel(), method=self._method_key(),
+            parallel=self._parallel(), method=self._method_key(), photos=self._photos(),
             extra_roots=self._extra_roots())
         if not retry:
             self._refresh_inventory()
@@ -1218,6 +1251,11 @@ class MainWindow(QMainWindow):
                      "click <b>Fix now</b>.</li>"
                      "<li>Rebuild this pack after XPME / AutoOrtho update their base packages "
                      "or after flattening an airport in XPME.</li>")
+        elif self._photos() == "xpme":
+            steps = ("<li>Keep XPME installed and <b>running</b> while you fly - it delivers the "
+                     "photos for the new mesh.</li>"
+                     "<li>The pack is listed in front of XPME's block in scenery_packs.ini; if it "
+                     "ever shows up as <i>Needs a fix</i> on step 1, click <b>Fix now</b>.</li>")
         else:
             steps = ("<li>Restart <b>AutoOrtho</b> so it mounts the new pack.</li>"
                      if ao_mode else "")
@@ -1276,7 +1314,8 @@ class MainWindow(QMainWindow):
         index = self.parallel_combo.findData(max(0, min(8, s.parallel)))
         self.parallel_combo.setCurrentIndex(max(0, index))
         self.dem_folder_edit.setText(s.local_dem_folder)
-        (self.target_cs if s.install_target == "custom_scenery" else self.target_ao).setChecked(True)
+        {"custom_scenery": self.target_cs, "xpme": self.target_xpme}.get(
+            s.install_target, self.target_ao).setChecked(True)
         for card in self.method_cards:
             card.radio.setChecked(card.key == s.method)
         self._method_changed()
@@ -1291,7 +1330,8 @@ class MainWindow(QMainWindow):
         s.mesh_detail = self._mesh_key()
         s.parallel = int(self.parallel_combo.currentData() or 0)
         s.local_dem_folder = self.dem_folder_edit.text().strip()
-        s.install_target = "autoortho" if self.target_ao.isChecked() else "custom_scenery"
+        s.install_target = ("xpme" if self.target_xpme.isChecked() else
+                            "autoortho" if self.target_ao.isChecked() else "custom_scenery")
         s.method = self._method_key()
         current = self.region_list.currentItem()
         s.last_region = current.data(Qt.UserRole) if current else s.last_region

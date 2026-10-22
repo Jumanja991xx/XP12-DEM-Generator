@@ -28,9 +28,9 @@ very visible.
 
 | | **Improve my current terrain** (default) | **Build a new, denser mesh** |
 |---|---|---|
-| Works with | **XPME**, AutoOrtho, Ortho4XP packs, **default X-Plane scenery (no ortho)** | AutoOrtho only |
+| Works with | **XPME**, AutoOrtho, Ortho4XP packs, **default X-Plane scenery (no ortho)** | **XPME** or AutoOrtho (they deliver the photos) |
 | What it does | Takes the base mesh X-Plane currently uses for each tile and replaces the vertex heights and normals with LiDAR values | Ortho4XP builds a completely new mesh from the LiDAR data |
-| Textures, water, roads, forests | unchanged — still delivered by XPME / AutoOrtho / X-Plane | new Ortho4XP mesh, photos from AutoOrtho |
+| Textures, water, roads, forests | unchanged — still delivered by XPME / AutoOrtho / X-Plane | new Ortho4XP mesh (water/roads from OpenStreetMap), photos from XPME or AutoOrtho |
 | Detail | as dense as your current mesh, but with correct heights | densest (selectable mesh detail) |
 | Needs internet for | DEM download | DEM download + OpenStreetMap (Overpass) |
 | Time per 1°×1° tile | ~2 min | 2–6 min |
@@ -52,6 +52,13 @@ very visible.
    are smooth.
 5. The result is installed as `Custom Scenery/z_dem_<region>` and listed in
    `scenery_packs.ini` **directly above** the pack it improves.
+
+**New mesh with XPME's photos.** Improve keeps the points of the existing mesh, so fine
+(10 m / LiDAR) data shows only partly. For the full detail choose *Build a new, denser mesh*
+and, on the Create page, *Custom Scenery, photos from XPME*. Ortho4XP builds the mesh with the
+same photo tiling XPME uses (Bing, zoom 16, zoom 18 around airports); the terrain files point
+straight at `XPME_<region>/textures/…`, which XPME delivers on demand. The pack is installed as
+`Custom Scenery/z_dem_mesh_<region>` above XPME's packages. XPME must be running while you fly.
 
 ## Quick start (Windows 10/11)
 
