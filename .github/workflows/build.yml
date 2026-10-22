@@ -66,6 +66,37 @@ jobs:
           if (Test-Path "$xp\Custom Scenery\scenery_packs.ini") { $diag += Get-Content "$xp\Custom Scenery\scenery_packs.ini" }
           $text = (($diag | ForEach-Object { "$_" -replace '%', '%25' -replace "`r", '' }) -join "%0A") -replace "::", ": :"
           if ($ok) { Write-Output "::notice title=Smoke test::$text" } else { Write-Output "::error title=Smoke test::$text"; exit 1 }
+      - name: Smoke test - new mesh with XPME's photos
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          # A stand-in XPME package outside X-Plane (absolute scenery_packs.ini entry, like
+          # XPME's Documents folder); the new mesh must point its terrain at its textures.
+          $xpme = Join-Path $env:RUNNER_TEMP "Documents\XPMapEnhancement\BasePack\XPME_Europe"
+          New-Item -ItemType Directory -Force -Path "$xpme\Earth nav data\+40+010", "$xpme\textures" | Out-Null
+          Set-Content "$xpme\Earth nav data\+40+010\+47+011.dsf" "x"
+          $ini = "$env:XP\Custom Scenery\scenery_packs.ini"
+          $saved = Get-Content $ini -Raw
+          Add-Content $ini ("SCENERY_PACK " + ($xpme -replace '\\', '/') + "/")
+          $p = Start-Process -FilePath "dist\XP12DEMGenerator\XP12DEMGenerator.exe" -Wait -PassThru -ArgumentList @(
+            "build", "--method", "rebuild", "--tiles", "+47+011", "--name", "`"CI XPME`"", "--resolution", "3",
+            "--mesh", "balanced", "--xplane", "`"$env:XP`"", "--target", "xpme")
+          $pack = "$env:XP\Custom Scenery\z_dem_mesh_ci_xpme"
+          $dsf = "$pack\Earth nav data\+40+010\+47+011.dsf"
+          $ter = Get-ChildItem "$pack\terrain" -Filter *.ter -ErrorAction SilentlyContinue | Select-Object -First 1
+          $tex = if ($ter) { (Get-Content $ter.FullName | Where-Object { $_ -match '^BASE_TEX' }) -join ' ' } else { "" }
+          $lines = Get-Content $ini
+          $mine = [array]::FindIndex([string[]]$lines, [Predicate[string]]{ param($l) $l -match 'z_dem_mesh_ci_xpme' })
+          $theirs = [array]::FindIndex([string[]]$lines, [Predicate[string]]{ param($l) $l -match 'XPME_Europe' })
+          $ok = ($p.ExitCode -eq 0) -and (Test-Path $dsf) -and ($tex -match 'XPME_Europe/textures/\d+_\d+_BI1[68]\.dds') -and ($mine -ge 0) -and ($mine -lt $theirs)
+          $diag = @("exit=$($p.ExitCode) dsf=$(Test-Path $dsf) ini=$mine<$theirs", "ter: $tex")
+          if (Test-Path "$env:XP12DEM_DATA\logs\cli.log") { $diag += Get-Content "$env:XP12DEM_DATA\logs\cli.log" -Tail 25 }
+          $diag += $lines
+          # leave X-Plane as the next steps expect it
+          Set-Content $ini $saved -NoNewline
+          Remove-Item -Recurse -Force $pack -ErrorAction SilentlyContinue
+          $text = (($diag | ForEach-Object { "$_" -replace '%', '%25' -replace "`r", '' }) -join "%0A") -replace "::", ": :"
+          if ($ok) { Write-Output "::notice title=XPME mesh smoke test::$text" } else { Write-Output "::error title=XPME mesh smoke test::$text"; exit 1 }
       - name: Smoke test - improve existing terrain (XPME / no-ortho mode)
         timeout-minutes: 20
         shell: pwsh
