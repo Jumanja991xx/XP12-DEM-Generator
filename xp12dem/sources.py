@@ -593,19 +593,23 @@ class LocalSource(Source):
         out, changed = [], False
         for path in folder.rglob("*"):
             suffix = path.suffix.lower()
-            if not path.is_file() or suffix not in (".tif", ".tiff", ".hgt"):
+            if not path.is_file() or suffix not in (".tif", ".tiff", ".hgt", ".zip"):
                 continue
             if "fabdem" in path.name.lower():
                 continue  # FABDEM files are used by the FABDEM source
             stat = path.stat()
             key = f"{path}|{stat.st_size}|{int(stat.st_mtime)}"
-            entry = cache.get(key)
-            if entry is None:
-                entry = self._describe(path)
-                cache[key] = entry
+            entries = cache.get(key, "?")
+            if entries == "?":
+                entries = (self._describe_zip(path, ctx.index_path("unzipped")) if suffix == ".zip"
+                           else [self._describe(path)])
+                cache[key] = entries
                 changed = True
-            if entry:
-                out.append(dict(entry, path=str(path)))
+            if isinstance(entries, dict):  # cache written by an older version
+                entries = [entries]
+            for entry in entries or []:
+                if entry:
+                    out.append(dict(entry, path=entry.get("path", str(path))))
         if changed:
             cache_file.parent.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(json.dumps(cache), encoding="utf-8")
@@ -630,6 +634,43 @@ class LocalSource(Source):
         except Exception:
             return None
 
+    @classmethod
+    def _describe_zip(cls, path: Path, unzip_dir: Path) -> list[dict]:
+        """Elevation files inside a zip (e.g. Sonny's 0.5" Austria tiles). .hgt members are
+        read straight from the zip, GeoTIFFs are unpacked once (they need random access)."""
+        entries = []
+        try:
+            with zipfile.ZipFile(path) as archive:
+                for info in archive.infolist():
+                    name = info.filename
+                    low = name.lower()
+                    if low.endswith(".hgt"):
+                        m = re.match(r"(?i)([ns])(\d{2})([ew])(\d{3})", Path(name).stem)
+                        if not m:
+                            continue
+                        lat = int(m[2]) * (1 if m[1].upper() == "N" else -1)
+                        lon = int(m[4]) * (1 if m[3].upper() == "E" else -1)
+                        size = int(round(math.sqrt(info.file_size / 2)))
+                        entries.append({"bounds": [lon, lat, lon + 1, lat + 1], "member": name,
+                                        "path": str(path),
+                                        "res_m": R.metres_per_degree_lat() / max(size - 1, 1)})
+                    elif low.endswith((".tif", ".tiff")):
+                        target = unzip_dir / f"{path.stem}_{abs(hash(str(path))) % 10**8}" / Path(name).name
+                        if not target.is_file():
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            with archive.open(info) as src, open(target, "wb") as dst:
+                                while True:
+                                    chunk = src.read(1 << 20)
+                                    if not chunk:
+                                        break
+                                    dst.write(chunk)
+                        entry = cls._describe(target)
+                        if entry:
+                            entries.append(dict(entry, path=str(target)))
+        except (OSError, zipfile.BadZipFile):
+            return []
+        return entries
+
     def files_for(self, ctx, lat: int, lon: int) -> list[dict]:
         return [e for e in self.index(ctx)
                 if e["bounds"][0] < lon + 1 and e["bounds"][2] > lon
@@ -645,8 +686,15 @@ class LocalSource(Source):
             ctx.check()
             path = Path(entry["path"])
             try:
-                if path.suffix.lower() == ".hgt":
-                    grid = R.read_hgt(path)
+                if entry.get("member") or path.suffix.lower() == ".hgt":
+                    if entry.get("member"):
+                        with zipfile.ZipFile(path) as archive:
+                            raw = archive.read(entry["member"])
+                        size = int(round(math.sqrt(len(raw) / 2)))
+                        grid = np.frombuffer(raw, ">i2").reshape(size, size).astype(np.float32)
+                        grid[grid <= -32000] = np.nan
+                    else:
+                        grid = R.read_hgt(path)
                     size = grid.shape[0]
                     w, s = entry["bounds"][0], entry["bounds"][1]
                     rasters.append(R.Raster(grid, w, s + 1, 1.0 / (size - 1), 1.0 / (size - 1)))

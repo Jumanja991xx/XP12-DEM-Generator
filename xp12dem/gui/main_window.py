@@ -77,6 +77,8 @@ Copernicus GLO-30 fills gaps</td><td><span style="color:#ff6b6b">Basic</span></t
 Any GeoTIFF in any projection works - the app finds the tiles by their coordinates and prefers
 them over everything else.</p>
 <ul>
+<li><b>Austria &amp; Switzerland</b> - Sonny's finer models 0.5″ (≈15 m) and 10 m: sonny.4lima.de
+(Google Drive) - the downloaded .zip files can go into the folder as they are</li>
 <li><b>Switzerland</b> - swissALTI3D 0.5 / 2 m: swisstopo.admin.ch (Height model swissALTI3D)</li>
 <li><b>Austria</b> - ALS DTM 1 m / 10 m: data.gv.at (Digitales Geländemodell Österreich)</li>
 <li><b>Bavaria</b> - DGM1: geodaten.bayern.de (OpenData, Digitales Geländemodell 1 m)</li>

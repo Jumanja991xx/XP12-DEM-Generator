@@ -159,7 +159,7 @@ class DemStore:
 
         if self.local_source:
             native = SOURCES["local"].native_m_for(self._context(None, None), lat, lon)
-            if native is not None and native <= 12:
+            if native is not None and native <= 20:  # e.g. Sonny's 0.5" (~15 m) or 10 m models
                 return True
         info = tile_info((lat, lon))
         return bool(info and info.fine)

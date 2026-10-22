@@ -164,3 +164,23 @@ def test_arcticdem_heights_are_shifted_to_sea_level(tmp_path, monkeypatch):
     monkeypatch.setattr(S.Glo30Source, "fetch", glo30)
     shifted = S.ArcticSource._to_sea_level(S.Context(None, tmp_path), terrain + 40.0, 67, -51)
     assert np.allclose(shifted, terrain, atol=0.5)
+
+
+def test_sonny_half_arcsecond_zip_in_own_folder(tmp_path):
+    """Sonny's 0.5" Austria tiles (7201 x 7201 .hgt, zipped) work without unpacking."""
+    import zipfile as zf
+
+    folder = tmp_path / "own"
+    folder.mkdir()
+    size = 7201
+    data = np.full((size, size), 2000, dtype=">i2")
+    data[:, size // 2:] = 2500
+    with zf.ZipFile(folder / "N47E011.zip", "w") as archive:
+        archive.writestr("N47E011.hgt", data.tobytes())
+    store = dem.DemStore(tmp_path / "cache", local_source=folder, session=None)
+    assert store.candidates(47, 11)[0] == "local"
+    assert store.fine_available(47, 11)  # ~15 m posts: worth 1/3"
+    path, main = store.ensure_with_source(47, 11, "13")
+    grid = R.read_hgt(path)
+    assert main == "local" and grid.shape == (10801, 10801)
+    assert grid[100, 100] == 2000 and grid[100, -100] == 2500

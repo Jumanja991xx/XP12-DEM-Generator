@@ -160,7 +160,7 @@ step is visible. The map colours show the result before you build (hover a tile 
 * Australia: FABDEM; free LiDAR (1–5 m) from ELVIS can be added as own files.
 * **Own elevation files** (step 2, Advanced): any GeoTIFF in any projection (found by its
   coordinates, not its name), SRTM `.hgt`, Sonny `.zip`, FABDEM zip/`.tif`. These files win over
-  everything else. Free 1–10 m data you can add this way: swissALTI3D (swisstopo), Austria's
+  everything else. Free 1–15 m data you can add this way (zips work as they are): Sonny's 0.5″ / 10 m models of Austria and Switzerland (sonny.4lima.de, Google Drive), swissALTI3D (swisstopo), Austria's
   ALS DTM (data.gv.at), Bavaria's DGM1 (geodaten.bayern.de), South Tyrol's DTM, Australian
   LiDAR from ELVIS (elevation.fsdf.org.au), Mexico's CEM (INEGI).
 * **Resolution:** 1″ (≈30 m) is the default. 1/3″ (≈10 m) uses the full detail where a 1–10 m
