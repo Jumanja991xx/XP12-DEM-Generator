@@ -919,6 +919,33 @@ class MainWindow(QMainWindow):
         except OSError:
             return []
 
+    def _xpme_not_ready(self, tiles) -> list[str]:
+        """XPME packages covering these tiles that do not serve their files right now."""
+        if self.xplane is None or not self._xpme_packs():
+            return []
+        from ..reheight import find_photo_pack, photo_pack_ready
+
+        down: set[str] = set()
+        checked: set[str] = set()
+        for tile in list(tiles)[:40]:
+            found = find_photo_pack(tile, self.xplane)
+            if found is None or found[0] in checked:
+                continue
+            checked.add(found[0])
+            if not photo_pack_ready(found[1], tile):
+                down.add(found[0])
+        return sorted(down)
+
+    def _xpme_line(self, tiles) -> str:
+        down = self._xpme_not_ready(tiles)
+        if down:
+            return ("<br><b style='color:#ff6b6b'>⚠ XPME is not running (or still loading)</b> - "
+                    f"{', '.join(down)} does not deliver its files. Start XPME and wait until it has "
+                    "finished loading before you click Create.")
+        if self._xpme_packs() and tiles:
+            return "<br><span style='color:#3ad070'>✓ XPME is running</span>"
+        return ""
+
     def _refresh_summary(self) -> None:
         tiles = self.map.selected()
         res = next(r for r in RESOLUTIONS if r.key == self._res_key())
@@ -949,7 +976,7 @@ class MainWindow(QMainWindow):
         self.target_cs.setVisible(not improve)
         self.target_xpme.setVisible(not improve)
         if improve:
-            self.target_hint.setText(self._sources_preview(tiles))
+            self.target_hint.setText(self._sources_preview(tiles) + self._xpme_line(tiles))
             target_ok = self._target() is not None
             busy = self.thread is not None and self.thread.isRunning()
             self.create_btn.setEnabled(bool(tiles) and target_ok and not busy)
@@ -976,7 +1003,7 @@ class MainWindow(QMainWindow):
                 "A new mesh from the LiDAR data, with XPME's photos on it. The pack goes into "
                 "Custom Scenery above XPME's packages, which stay installed: <b>XPME must be "
                 "running</b> while you fly, it delivers the photos. Water, roads and objects come "
-                "from OpenStreetMap / X-Plane, not from XPME.")
+                "from OpenStreetMap / X-Plane, not from XPME." + self._xpme_line(tiles))
         elif self.target_ao.isChecked():
             self.target_hint.setText(
                 "The pack is placed next to AutoOrtho's own packs and appears in Custom Scenery "
@@ -1096,6 +1123,31 @@ class MainWindow(QMainWindow):
         tiles = list(tiles) if tiles else self.map.selected()
         self._last_tiles = list(tiles)
         name = self.name_edit.text().strip() or "My region"
+        if self._method_key() == "improve" or self._photos() == "xpme":
+            down = self._xpme_not_ready(tiles)
+            while down:
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Warning)
+                box.setWindowTitle(APP_NAME)
+                box.setText("<b>XPME is not running</b> (or still loading).")
+                box.setInformativeText(
+                    f"{', '.join(down)} does not deliver its files right now"
+                    + (", so its terrain cannot be improved." if self._method_key() == "improve"
+                       else " - the new mesh can be built, but its photos cannot be checked.")
+                    + "\n\nStart XPME, wait until it has finished loading, then click Check again.")
+                again = box.addButton("Check again", QMessageBox.AcceptRole)
+                anyway = (box.addButton("Build anyway", QMessageBox.DestructiveRole)
+                          if self._photos() == "xpme" else None)
+                box.addButton(QMessageBox.Cancel)
+                box.exec()
+                if box.clickedButton() is again:
+                    down = self._xpme_not_ready(tiles)
+                    continue
+                if anyway is not None and box.clickedButton() is anyway:
+                    break
+                self._refresh_summary()
+                return
+            self._refresh_summary()
         self._save_choices()
         request = BuildRequest(
             tiles=tiles, region_name=name, slug=regions.slugify(name),

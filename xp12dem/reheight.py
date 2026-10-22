@@ -511,6 +511,34 @@ def find_photo_pack(tile: Tile, xplane: Path) -> Optional[tuple[str, Path]]:
     return None
 
 
+def _o4x_texture_stem(lat: float, lon: float, zl: int = 16) -> str:
+    """Ortho4XP texture name (``<row>_<col>``) covering a point - XPME uses the same tiling."""
+    n = 2 ** zl
+    x = int((lon + 180.0) / 360.0 * n)
+    y = int((1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * n)
+    return f"{y // 16 * 16}_{x // 16 * 16}"
+
+
+def photo_pack_ready(pack_root: Path, tile: Tile) -> bool:
+    """Does a virtual photo pack (XPME) serve its terrain files right now?
+
+    XPME only provides ``terrain/*.ter`` while it runs and has finished loading;
+    its DSFs may be readable anyway. A few texture names inside the tile are probed.
+    """
+    lat, lon = tile
+    terrain = Path(pack_root) / "terrain"
+    for dlat in (0.5, 0.25, 0.75):
+        for dlon in (0.5, 0.25, 0.75):
+            stem = _o4x_texture_stem(lat + dlat, lon + dlon)
+            for suffix in ("", "_sea", "_water"):
+                try:
+                    if (terrain / f"{stem}_BI16{suffix}.ter").is_file():
+                        return True
+                except OSError:
+                    continue
+    return False
+
+
 def point_ter_at_photos(text: str, textures_dir: Path, ter_dir: Path) -> tuple[str, list[str]]:
     """Make an Ortho4XP .ter use photos from another pack (XPME) instead of
     ``../textures``. Masks (PNG) stay local. Returns the text and the photos used."""
@@ -646,6 +674,11 @@ def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: Mes
     # Copy local terrain definitions so their textures point back to the source pack.
     if source.kind == "pack":
         unreadable = [name for name in local if texts[name] is None]
+        if unreadable and len(unreadable) == len(local):
+            raise RuntimeError(
+                f"{source.name} is not running (or still loading): none of its {len(local)} terrain "
+                "files could be read. Start XPME / AutoOrtho, wait until it has finished loading, "
+                "then build again. (Nothing was installed, X-Plane keeps the original terrain.)")
         if unreadable:
             log(f"   {source.name} does not provide {unreadable[0]}")
             raise RuntimeError(

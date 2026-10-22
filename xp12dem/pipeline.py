@@ -56,6 +56,10 @@ def mesh_detail(key: str) -> MeshDetail:
     raise KeyError(key)
 
 
+XPME_NOT_RUNNING = ("XPME is not running (or still loading): {} does not provide its terrain files. "
+                    "Start XPME, wait until it has finished loading, then build again.")
+
+
 @dataclass
 class BuildRequest:
     tiles: list[Tile]
@@ -394,6 +398,9 @@ class Pipeline:
                                           seven_zip=seven, tmp_dir=tmp)
                 if not src.dsf.is_file():
                     raise FileNotFoundError(f"no terrain found for this tile ({src.dsf} missing)")
+                if (src.kind == "pack" and src.name.lower().startswith("xpme") and src.pack_root
+                        and not RH.photo_pack_ready(src.pack_root, tile)):
+                    raise RuntimeError(XPME_NOT_RUNNING.format(src.name))
                 sources[tile] = src
                 self.events.log(f"{tile_name(*tile)}: current terrain = {src.label}")
                 if src.unreadable_above:

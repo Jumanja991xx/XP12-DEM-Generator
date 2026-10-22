@@ -417,7 +417,7 @@ def test_missing_terrain_files_are_detected_and_block_install(tmp_path):
                              log=lambda *_: None)
     finally:
         RH.read_text_retry = monkey
-    assert "did not provide" in str(err.value) and "_water_overlay.ter" in str(err.value)
+    assert "not running" in str(err.value)
 
 
 def test_inventory_reports_and_removes_broken_tiles(tmp_path):
@@ -459,3 +459,12 @@ def test_highlights_point_to_the_biggest_changes(tmp_path):
     assert spots[0] == {"lat": 47.5, "lon": 11.59, "old": 1059, "new": 1000}  # biggest drop
     assert len(spots) == 3 and all(abs(a["lon"] - b["lon"]) > 0.03 for a in spots for b in spots if a is not b)
     assert stats.big == 49  # changes above 10 m
+
+
+def test_photo_pack_ready_probes_xpme_terrain(tmp_path):
+    xpme = tmp_path / "XPME_Europe"
+    (xpme / "terrain").mkdir(parents=True)
+    assert not RH.photo_pack_ready(xpme, (47, 11))  # XPME not running: no .ter files
+    (xpme / "terrain" / f"{RH._o4x_texture_stem(47.5, 11.5)}_BI16.ter").write_text("A\n800\nTERRAIN\n")
+    assert RH.photo_pack_ready(xpme, (47, 11))
+    assert RH._o4x_texture_stem(47.26, 11.35) == "22976_34832"
