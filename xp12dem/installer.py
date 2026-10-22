@@ -70,7 +70,8 @@ class InstallTarget:
 def assemble_pack(tile_dirs: dict[Tile, Path], pack_dir: Path, *, region_name: str,
                   resolution_label: str, mesh_label: str,
                   sources: Optional[dict[Tile, str]] = None,
-                  dem_sources: Optional[dict[Tile, str]] = None) -> list[Tile]:
+                  dem_sources: Optional[dict[Tile, str]] = None,
+                  method: Optional[str] = None) -> list[Tile]:
     """Merge Ortho4XP tile build folders into one scenery pack folder.
 
     Only what X-Plane needs is copied: the DSF, the .ter terrain definitions
@@ -98,14 +99,16 @@ def assemble_pack(tile_dirs: dict[Tile, Path], pack_dir: Path, *, region_name: s
         added.append((lat, lon))
     if sources is None:
         (pack_dir / "textures").mkdir(parents=True, exist_ok=True)
-    _write_manifest(pack_dir, added, region_name, resolution_label, mesh_label, sources, dem_sources)
+    _write_manifest(pack_dir, added, region_name, resolution_label, mesh_label, sources, dem_sources,
+                    method or ("improve" if sources is not None else "rebuild"))
     return added
 
 
 def _write_manifest(pack_dir: Path, added: list[Tile], region_name: str,
                     resolution_label: str, mesh_label: str,
                     sources: Optional[dict[Tile, str]] = None,
-                    dem_sources: Optional[dict[Tile, str]] = None) -> None:
+                    dem_sources: Optional[dict[Tile, str]] = None,
+                    method: str = "rebuild") -> None:
     manifest_path = pack_dir / MANIFEST
     tiles = set()
     known_sources: dict[str, str] = {}
@@ -131,7 +134,7 @@ def _write_manifest(pack_dir: Path, added: list[Tile], region_name: str,
         "dem": ", ".join(sorted(set(known_dems.values()))) or "Sonny's LiDAR DTM Europe",
         "elevation_sources": known_dems,
         "resolution": resolution_label,
-        "method": "improve" if sources is not None else "rebuild",
+        "method": method,
         "mesh_detail": mesh_label,
         "sources": known_sources,
         "built": time.strftime("%Y-%m-%d %H:%M"),

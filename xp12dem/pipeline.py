@@ -308,7 +308,8 @@ class Pipeline:
                       mesh_label="unchanged (existing mesh)" if improve else detail.label,
                       sources=({t: sources[t].label for t in tile_dirs} if improve else
                                {t: photo_packs[t][0] for t in tile_dirs} if photo_packs else None),
-                      dem_sources={t: self.dem_sources.get(t, "") for t in tile_dirs})
+                      dem_sources={t: self.dem_sources.get(t, "") for t in tile_dirs},
+                      method=req.method)
         if req.install:
             self.events.stage("Installing into X-Plane 12")
             above = {src.name for t, src in sources.items() if t in tile_dirs and src.kind == "pack"}
