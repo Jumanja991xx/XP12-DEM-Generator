@@ -510,6 +510,20 @@ class ReheightStats:
     rasters: int = 0
     heights_range: Optional[tuple[float, float]] = None  # storable heights of the new DSF
     clamped: int = 0  # vertices limited to the original height range (fallback mode)
+    big: int = 0  # vertices moved by more than 10 m
+    spots: list = field(default_factory=list)  # (abs change, lon, lat, old, new) candidates
+
+    def highlights(self, count: int = 3, min_distance_deg: float = 0.03) -> list[dict]:
+        """The places with the biggest height change, a few km apart - where to look."""
+        chosen: list[tuple] = []
+        for spot in sorted(self.spots, key=lambda s: -s[0]):
+            if all(abs(spot[1] - c[1]) > min_distance_deg or abs(spot[2] - c[2]) > min_distance_deg
+                   for c in chosen):
+                chosen.append(spot)
+            if len(chosen) == count:
+                break
+        return [{"lat": round(c[2], 4), "lon": round(c[1], 4), "old": round(c[3]), "new": round(c[4])}
+                for c in chosen]
 
 
 def heights_range(step: float, offset: float) -> tuple[float, float]:
@@ -637,7 +651,14 @@ def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: Mes
         if changed.any():
             d = np.abs(target - elev)[changed]
             stats.max_delta = max(stats.max_delta, float(d.max()))
+            stats.big += int((d > 10).sum())
             deltas.append(float(d.sum()))
+            where = np.nonzero(changed)[0]
+            for i in where[np.argsort(-d)[:10]]:
+                stats.spots.append((abs(float(target[i] - elev[i])), float(lon[i]), float(lat[i]),
+                                    float(elev[i]), float(target[i])))
+            if len(stats.spots) > 400:
+                stats.spots = sorted(stats.spots, key=lambda s: -s[0])[:200]
         if keep_height_range:
             limited = np.clip(target, orig_lo, orig_hi)
             stats.clamped += int((valid & (limited != target)).sum())

@@ -287,7 +287,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.addWidget(_title("1  Choose a region"))
         layout.addWidget(_hint("Pick a preset or click 1°×1° tiles on the map. Drag to move the map, "
-                               "mouse wheel or +/− to zoom, Shift+drag selects many tiles, right-drag "
+                               "mouse wheel or +/− to zoom, Shift+drag selects many tiles, right-drag or Esc "
                                "removes them. Green = LiDAR (best), blue = national model, red = satellite "
                                "only. <b style='color:#ff8c00'>Orange ✓</b> tiles are already installed; "
                                "dashed ones have their data downloaded but are not built yet."))
@@ -326,7 +326,8 @@ class MainWindow(QMainWindow):
         self.name_edit.textChanged.connect(self._update_status)
         left_layout.addWidget(self.name_edit)
         buttons = QHBoxLayout()
-        clear_btn = QPushButton("Clear")
+        clear_btn = QPushButton("Deselect all")
+        clear_btn.setToolTip("Remove all tiles from the selection (or press Esc on the map)")
         clear_btn.clicked.connect(lambda: self.map.set_selected([], focus=False))
         buttons.addWidget(clear_btn)
         self.view_combo = QComboBox()
@@ -1176,6 +1177,7 @@ class MainWindow(QMainWindow):
         self.done_label.setTextFormat(Qt.RichText)
         self.done_label.setWordWrap(True)
         self.done_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.done_label.setOpenExternalLinks(True)
         layout.addWidget(self.done_label)
         buttons = QHBoxLayout()
         open_btn = QPushButton("Open pack folder")
@@ -1220,7 +1222,7 @@ class MainWindow(QMainWindow):
         self.done_label.setText(
             f"<p style='font-size:15px'>✅ <b>{len(result.ok_tiles)} tile(s)</b> built in "
             f"{result.seconds / 60:.1f} min and installed to:<br><code>{result.installed_to}</code></p>"
-            f"{failed}"
+            f"{failed}{self._highlights_html(result)}"
             f"<p><b>Next steps</b></p><ol>{steps}"
             "<li>Start X-Plane 12 and fly - the new terrain is used automatically.</li>"
             "<li>scenery_packs.ini was updated; a backup is stored as "
@@ -1231,6 +1233,24 @@ class MainWindow(QMainWindow):
                "Mesh built with Ortho4XP (GPL v3). Vector data © OpenStreetMap contributors.")
             + "</p>")
         self._go(3)
+
+    @staticmethod
+    def _highlights_html(result: BuildResult) -> str:
+        """Where the new heights differ most from the old terrain - places to compare."""
+        spots = [dict(h, tile=t) for t, items in result.highlights.items() for h in items]
+        spots.sort(key=lambda h: -abs(h["new"] - h["old"]))
+        if not spots:
+            return ""
+        rows = []
+        for h in spots[:6]:
+            link = (f"https://www.openstreetmap.org/?mlat={h['lat']}&mlon={h['lon']}"
+                    f"#map=14/{h['lat']}/{h['lon']}")
+            rows.append(f"<li><b>{h['new'] - h['old']:+d} m</b> at "
+                        f"<a style='color:#f0a030' href='{link}'>{h['lat']:.4f}, {h['lon']:.4f}</a> "
+                        f"({h['old']} m → {h['new']} m, tile {regions.tile_name(*h['tile'])})</li>")
+        return ("<p><b>Where to see the difference</b> - the terrain changed most here. Fly there "
+                "(Map → place the aircraft at these coordinates) and compare with the pack "
+                "disabled:</p><ul>" + "".join(rows) + "</ul>")
 
     def _open_pack(self) -> None:
         if self.result and self.result.installed_to:

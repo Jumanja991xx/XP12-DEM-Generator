@@ -99,6 +99,7 @@ class BuildResult:
     failed_tiles: dict[Tile, str] = field(default_factory=dict)
     installed_to: Optional[Path] = None
     cancelled: bool = False
+    highlights: dict = field(default_factory=dict)  # tile -> biggest height changes
     seconds: float = 0.0
 
 
@@ -152,6 +153,7 @@ class Pipeline:
         self._procs: set[subprocess.Popen] = set()
         self._lock = threading.Lock()
         self.dem_sources: dict[Tile, str] = {}  # tile -> elevation source used
+        self.highlights: dict[Tile, list] = {}  # tile -> where the height changed most
         self._install_dir: Optional[Path] = None
         self.eta: Optional[Estimator] = None
         self._history = TimingHistory(paths.data_root() / "timings.json")
@@ -318,6 +320,7 @@ class Pipeline:
 
     # ------------------------------------------------------------------
     def _finish(self, result: BuildResult, started: float) -> BuildResult:
+        result.highlights = {t: h for t, h in self.highlights.items() if t in result.ok_tiles}
         self._ticking.set()
         self._history.save()
         result.seconds = time.time() - started
@@ -511,6 +514,13 @@ class Pipeline:
                     elif kind == "log":
                         message = event.get("message", "")
                         self.events.log(f"{name}:   {message}")
+                    elif kind == "highlights":
+                        items = event.get("items", [])
+                        with self._lock:
+                            self.highlights[tile] = items
+                        for h in items:
+                            self.events.log(f"{name}:   change {h['new'] - h['old']:+d} m at "
+                                            f"{h['lat']:.4f}, {h['lon']:.4f} ({h['old']} → {h['new']} m)")
                     elif kind == "warning":
                         self.events.log(f"{name}: warning - {event.get('message', '')}")
                     elif kind == "error":

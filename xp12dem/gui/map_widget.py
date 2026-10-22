@@ -606,6 +606,12 @@ class TileMap(QGraphicsView):
     def wheelEvent(self, event):  # noqa: N802 - Qt API
         self.zoom_by(1.25 if event.angleDelta().y() > 0 else 1 / 1.25, event.position().toPoint())
 
+    def keyPressEvent(self, event):  # noqa: N802 - Qt API
+        if event.key() == Qt.Key_Escape and self._editable and self._selected:
+            self.set_selected([], focus=False)
+            return
+        super().keyPressEvent(event)
+
     def mouseDoubleClickEvent(self, event):  # noqa: N802 - Qt API
         if event.button() == Qt.LeftButton:
             self.zoom_by(2.0, event.position())

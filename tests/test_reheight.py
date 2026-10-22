@@ -412,3 +412,18 @@ def test_inventory_reports_and_removes_broken_tiles(tmp_path):
     inventory.remove_tiles(found, list(found.broken))
     inv = inventory.scan(xp, tmp_path / "dem")
     assert not inv.needs_fix() and inv.pack("z_dem_my_region").tiles == [(45, 11)]
+
+
+def test_highlights_point_to_the_biggest_changes(tmp_path):
+    src = tmp_path / "src.txt"
+    rows = "".join(f"PATCH_VERTEX {11 + i / 100:.4f} 47.5 {1000 + i:.1f} 0.0 0.0\n" for i in range(60))
+    src.write_text("I\n800\nDSF2TEXT\nPROPERTY sim/west 11\nTERRAIN_DEF lib/g10/terrain10/fake.ter\n"
+                   "BEGIN_PATCH 0 0.0 -1.0 1 5\nBEGIN_PRIMITIVE 0\n" + rows + "END_PRIMITIVE\nEND_PATCH\n")
+    grid = np.full((121, 121), 1000.0, dtype=np.float32)
+    hf = RH.HeightField(47, 11, grid, feather_edges={k: False for k in "nsew"})
+    source = RH.MeshSource("global", "X-Plane 12 Global Scenery", tmp_path / "x.dsf", tmp_path)
+    stats = RH.reheight_dsf_text(src, tmp_path / "dst.txt", hf, source, tmp_path / "pack", tmp_path)
+    spots = stats.highlights()
+    assert spots[0] == {"lat": 47.5, "lon": 11.59, "old": 1059, "new": 1000}  # biggest drop
+    assert len(spots) == 3 and all(abs(a["lon"] - b["lon"]) > 0.03 for a in spots for b in spots if a is not b)
+    assert stats.big == 49  # changes above 10 m

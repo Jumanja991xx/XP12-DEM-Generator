@@ -212,7 +212,9 @@ def run_reheight(job: dict) -> int:
                              dsftool, seven, log=lambda text: emit("log", message=text.strip()),
                              install_dir=Path(job["install_dir"]) if job.get("install_dir") else None)
     emit("log", message=f"{stats.changed:,} of {stats.vertices:,} vertices raised/lowered, "
-                        f"mean change {stats.mean_abs_delta:.1f} m, max {stats.max_delta:.0f} m")
+                        f"mean change {stats.mean_abs_delta:.1f} m, max {stats.max_delta:.0f} m, "
+                        f"{stats.big:,} by more than 10 m")
+    emit("highlights", items=stats.highlights())
     emit("step_done", step="reheight", seconds=round(time.time() - started, 1))
     emit("done", dsf=str(Path(job["build_dir"]) / RH.dsf_relpath(lat, lon)))
     return 0
