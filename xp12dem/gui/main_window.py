@@ -496,11 +496,17 @@ class MainWindow(QMainWindow):
                 if p.misplaced:
                     why.append(f"stored in {p.path.parent} - XPME drops such entries when it "
                                "rewrites scenery_packs.ini")
+                if p.broken:
+                    names = ", ".join(regions.tile_name(*t) for t in sorted(p.broken)[:6])
+                    more = f" … (+{len(p.broken) - 6})" if len(p.broken) > 6 else ""
+                    why.append(f"{len(p.broken)} tile(s) miss terrain files ({names}{more}), so X-Plane "
+                               "refuses the whole pack - Fix now takes them out (they show XPME's "
+                               "terrain again); select them and build again")
                 lines.append(f"<b>{p.name}</b> ({len(p.tiles)} tiles): " + "; ".join(why))
             self.inactive_label.setText(
                 "<span style='color:#ff9a1f'><b>⚠ Needs a fix:</b> " + "<br>".join(lines)
-                + "<br>Fix now moves it into Custom Scenery (textures keep working) and lists it "
-                "above the scenery it improves.</span>")
+                + "<br>Fix now repairs this: broken tiles are taken out, packs move into Custom "
+                "Scenery (textures keep working) and are listed above the scenery they improve.</span>")
 
     def _activate_inactive(self) -> None:
         from ..installer import reactivate_pack, relocate_pack
@@ -510,8 +516,16 @@ class MainWindow(QMainWindow):
         custom = self.xplane / "Custom Scenery"
         errors, moved = [], []
         # several copies of one name: merge all into Custom Scenery/<name>
+        removed: list = []
         for pack in self.inventory.needs_fix():
             try:
+                if pack.broken:
+                    from ..inventory import remove_tiles
+
+                    remove_tiles(pack, list(pack.broken))
+                    removed += list(pack.broken)
+                if not any(pack.path.glob("Earth nav data/*/*.dsf")):
+                    continue  # nothing left in this copy
                 target = custom / pack.name
                 if pack.misplaced and pack.path.exists():
                     relocate_pack(pack.path, target)
@@ -523,8 +537,13 @@ class MainWindow(QMainWindow):
         if errors:
             QMessageBox.warning(self, APP_NAME, "Could not fix everything:\n" + "\n".join(errors))
         else:
+            if removed:
+                self.map.set_selected(sorted(set(removed)))
             QMessageBox.information(
                 self, APP_NAME, "Done.\n\n" + ("\n".join(moved) + "\n\n" if moved else "")
+                + (f"{len(set(removed))} incomplete tile(s) were taken out and are now selected - "
+                   "start XPME, wait until it has finished loading, then build them again "
+                   "(Next).\n\n" if removed else "")
                 + "The packs are listed in scenery_packs.ini above the scenery they improve (backup: "
                 "scenery_packs.ini.xp12dem.bak).")
 

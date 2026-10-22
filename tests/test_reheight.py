@@ -352,3 +352,63 @@ def test_relocating_a_pack_keeps_texture_paths_and_merges(tmp_path):
     manifest = json.loads((existing / "xp12dem_pack.json").read_text())
     assert manifest["tiles"] == [[47, 10], [47, 11]] and set(manifest["sources"]) == {"+47+010", "+47+011"}
     assert (existing / "Earth nav data" / "+40+010" / "+47+010.dsf").is_file()
+
+
+def test_missing_terrain_files_are_detected_and_block_install(tmp_path):
+    tool = _dsftool()
+    text = tmp_path / "src.txt"
+    text.write_text(DSF_TEXT.replace("TERRAIN_DEF lib/g10/terrain10/fake.ter",
+                                     "TERRAIN_DEF terrain/22928_34688_BI16_water_overlay.ter"))
+    pack = tmp_path / "pack"
+    dsf = pack / "Earth nav data" / "+40+010" / "+45+011.dsf"
+    dsf.parent.mkdir(parents=True)
+    RH.run_dsftool(tool, "--text2dsf", str(text), str(dsf))
+    assert RH.read_dsf_terrain_defs(dsf) == ["terrain_Water", "terrain/22928_34688_BI16_water_overlay.ter"]
+    assert RH.missing_terrain(pack, dsf) == ["terrain/22928_34688_BI16_water_overlay.ter"]
+    (pack / "terrain").mkdir()
+    (pack / "terrain" / "22928_34688_BI16_water_overlay.ter").write_text("A\n800\nTERRAIN\n")
+    assert RH.missing_terrain(pack, dsf) == []
+
+    # a source pack whose .ter cannot be read: the tile fails instead of being installed broken
+    source_pack = tmp_path / "XPME_Europe"
+    (source_pack / "Earth nav data" / "+40+010").mkdir(parents=True)
+    src_dsf = source_pack / "Earth nav data" / "+40+010" / "+45+011.dsf"
+    src_dsf.write_bytes(dsf.read_bytes())
+    source = RH.MeshSource("pack", "XPME_Europe", src_dsf, source_pack, source_pack)
+    hf = RH.HeightField(45, 11, np.full((121, 121), 10.0, dtype=np.float32),
+                        feather_edges={k: False for k in "nsew"})
+    monkey = RH.read_text_retry
+    try:
+        RH.read_text_retry = lambda path, attempts=5, delay=1.0: monkey(path, 1, 0)
+        with pytest.raises(RuntimeError) as err:
+            RH.reheight_tile((45, 11), source, hf, tmp_path / "out", tmp_path / "work", tool, None,
+                             log=lambda *_: None)
+    finally:
+        RH.read_text_retry = monkey
+    assert "did not provide" in str(err.value) and "_water_overlay.ter" in str(err.value)
+
+
+def test_inventory_reports_and_removes_broken_tiles(tmp_path):
+    tool = _dsftool()
+    from xp12dem import inventory
+
+    xp = tmp_path / "X-Plane 12"
+    pack = xp / "Custom Scenery" / "z_dem_my_region"
+    for tile, ter in (("+45+011", "terrain/a.ter"), ("+45+012", "terrain/b.ter")):
+        text = tmp_path / f"{tile}.txt"
+        # same content for both files - only the file name decides the tile here
+        text.write_text(DSF_TEXT.replace("TERRAIN_DEF lib/g10/terrain10/fake.ter", f"TERRAIN_DEF {ter}"))
+        dsf = pack / "Earth nav data" / "+40+010" / f"{tile}.dsf"
+        dsf.parent.mkdir(parents=True, exist_ok=True)
+        RH.run_dsftool(tool, "--text2dsf", str(text), str(dsf))
+    (pack / "terrain").mkdir()
+    (pack / "terrain" / "a.ter").write_text("A\n800\nTERRAIN\n")
+    (xp / "Custom Scenery" / "scenery_packs.ini").write_text(
+        "I\n1000 Version\nSCENERY\n\nSCENERY_PACK Custom Scenery/z_dem_my_region/\n")
+    inv = inventory.scan(xp, tmp_path / "dem")
+    found = inv.pack("z_dem_my_region")
+    assert set(found.broken) == {(45, 12)} and inv.needs_fix() == [found]
+    assert inv.active_on((45, 11)) and not inv.active_on((45, 12))
+    inventory.remove_tiles(found, list(found.broken))
+    inv = inventory.scan(xp, tmp_path / "dem")
+    assert not inv.needs_fix() and inv.pack("z_dem_my_region").tiles == [(45, 11)]

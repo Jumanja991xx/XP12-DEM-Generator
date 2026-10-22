@@ -131,6 +131,60 @@ def read_dsf_properties(path: Path, seven_zip: Optional[str] = None,
     return {}
 
 
+def read_dsf_terrain_defs(path: Path) -> list[str]:
+    """TERRAIN_DEF names of an uncompressed DSF (DEFN atom, TERT string table)."""
+    with open(path, "rb") as handle:
+        if handle.read(8) != b"XPLNEDSF":
+            return []
+        handle.read(4)
+        size = path.stat().st_size - 16
+        while handle.tell() < size:
+            header = handle.read(8)
+            if len(header) < 8:
+                break
+            atom_id, atom_len = header[:4], struct.unpack("<I", header[4:])[0]
+            if atom_id == b"NFED":  # 'DEFN' stored little endian
+                end = handle.tell() + atom_len - 8
+                while handle.tell() < end:
+                    sub = handle.read(8)
+                    if len(sub) < 8:
+                        break
+                    sub_id, sub_len = sub[:4], struct.unpack("<I", sub[4:])[0]
+                    body = handle.read(sub_len - 8)
+                    if sub_id == b"TRET":
+                        return [b.decode("utf-8", "replace") for b in body.split(b"\0") if b]
+                return []
+            if atom_len < 8:
+                break
+            handle.seek(atom_len - 8, os.SEEK_CUR)
+    return []
+
+
+def missing_terrain(pack_dir: Path, dsf_path: Path) -> list[str]:
+    """Pack-local terrain definitions a DSF needs but the pack does not contain."""
+    try:
+        defs = read_dsf_terrain_defs(dsf_path)
+    except OSError:
+        return []
+    return [d for d in defs
+            if not d.startswith(LIB_PREFIXES) and d.lower() not in WATER_DEFS
+            and not (pack_dir / d).is_file()]
+
+
+def read_text_retry(path: Path, attempts: int = 5, delay: float = 1.0) -> Optional[str]:
+    """Read a file that a virtual drive (XPME, AutoOrtho) may only provide on access."""
+    import time
+
+    for attempt in range(attempts):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                return handle.read()
+        except OSError:
+            if attempt + 1 < attempts:
+                time.sleep(delay)
+    return None
+
+
 class SourceUnavailable(RuntimeError):
     """A pack above the found mesh exists but cannot be read (virtual mount not running?)."""
 
@@ -521,17 +575,25 @@ def reheight_dsf_text(src_txt: Path, dst_txt: Path, hf: HeightField, source: Mes
 
     # Copy local terrain definitions so their textures point back to the source pack.
     if source.kind == "pack":
+        unreadable = []
         for name in defs:
             if name.startswith(LIB_PREFIXES) or name.lower() in WATER_DEFS:
                 continue
-            src = source.read_root / name
-            if src.is_file():
-                dst = out_pack / name
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                dst.write_text(rewrite_ter(src.read_text("utf-8", "replace"), name, source.name,
-                                           source.pack_root or source.read_root, install_dir),
-                               encoding="utf-8")
-                stats.copied_terrains += 1
+            text = read_text_retry(source.read_root / name)
+            if text is None:
+                unreadable.append(name)
+                continue
+            dst = out_pack / name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text(rewrite_ter(text, name, source.name, source.pack_root or source.read_root,
+                                       install_dir), encoding="utf-8")
+            stats.copied_terrains += 1
+        if unreadable:
+            raise RuntimeError(
+                f"{source.name} did not provide {len(unreadable)} terrain file(s), e.g. "
+                f"{unreadable[0]} - make sure XPME / AutoOrtho is running and has finished "
+                "loading, then retry this tile. (The tile was not installed, so X-Plane keeps "
+                "the original terrain.)")
 
     # Height range the new DSF must be able to store.
     finite = hf.grid[np.isfinite(hf.grid)]
@@ -717,6 +779,10 @@ def reheight_tile(tile: Tile, source: MeshSource, hf: HeightField, out_pack: Pat
         log(f"   {stats.clamped} vertices limited")
         log("   writing new DSF (fallback)")
         run_dsftool(dsftool, "--text2dsf", str(dst_txt), str(target))
+    missing = missing_terrain(out_pack, target)
+    if missing:  # never install a tile X-Plane would refuse
+        raise RuntimeError(f"terrain file {missing[0]} missing from the new tile "
+                           f"({len(missing)} in total) - tile not installed")
     for tmp in (src_txt, dst_txt):
         tmp.unlink(missing_ok=True)
     if plain != source.dsf:

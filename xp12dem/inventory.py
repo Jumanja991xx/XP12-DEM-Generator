@@ -32,6 +32,7 @@ class InstalledPack:
     enabled: bool = True  # listed (and not disabled) in scenery_packs.ini
     improves: list[str] = field(default_factory=list)  # packs whose terrain it re-heights
     misplaced: bool = False  # stored outside Custom Scenery (e.g. in XPME's folder) - should move
+    broken: dict[Tile, list[str]] = field(default_factory=dict)  # tile -> missing terrain files
 
     def describe(self) -> str:
         what = "improved terrain" if self.method == "improve" else "new mesh"
@@ -58,11 +59,12 @@ class Inventory:
         return [p for p in self.packs if not p.enabled]
 
     def needs_fix(self) -> list[InstalledPack]:
-        """Inactive packs, and packs in a folder another tool manages (XPME)."""
-        return [p for p in self.packs if not p.enabled or p.misplaced]
+        """Inactive packs, packs in a folder another tool manages (XPME), packs with
+        tiles X-Plane refuses (missing terrain files)."""
+        return [p for p in self.packs if not p.enabled or p.misplaced or p.broken]
 
     def active_on(self, tile: Tile) -> bool:
-        return any(p.enabled for p in self.installed.get(tile, []))
+        return any(p.enabled and tile not in p.broken for p in self.installed.get(tile, []))
 
 
 def _is_dem_pack(name: str) -> bool:
@@ -102,7 +104,40 @@ def read_pack(path: Path, enabled: bool = True) -> Optional[InstalledPack]:
                          resolution=manifest.get("resolution", ""), tiles=sorted(present),
                          elevation_sources=dict(manifest.get("elevation_sources", {})),
                          built=manifest.get("built", ""), enabled=enabled,
-                         improves=[i for i in improves if not i.startswith("X-Plane 12 Global")])
+                         improves=[i for i in improves if not i.startswith("X-Plane 12 Global")],
+                         broken=_broken_tiles(path))
+
+
+def _broken_tiles(pack: Path) -> dict[Tile, list[str]]:
+    """Tiles whose DSF needs terrain files the pack lacks - X-Plane refuses the whole pack."""
+    from .reheight import missing_terrain
+
+    broken = {}
+    for dsf in (pack / "Earth nav data").glob("*/*.dsf"):
+        try:
+            tile = parse_tile(dsf.stem)
+        except ValueError:
+            continue
+        missing = missing_terrain(pack, dsf)
+        if missing:
+            broken[tile] = missing
+    return broken
+
+
+def remove_tiles(pack: InstalledPack, tiles) -> None:
+    """Delete tiles from a pack (their original terrain shows again)."""
+    from .reheight import dsf_relpath
+
+    for lat, lon in tiles:
+        (pack.path / dsf_relpath(lat, lon)).unlink(missing_ok=True)
+    manifest_file = pack.path / MANIFEST
+    try:
+        manifest = json.loads(manifest_file.read_text("utf-8"))
+    except (OSError, ValueError):
+        return
+    gone = {tuple(t) for t in tiles}
+    manifest["tiles"] = [t for t in manifest.get("tiles", []) if tuple(t) not in gone]
+    manifest_file.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
 def _same(a: Path, b: Path) -> bool:
