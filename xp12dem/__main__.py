@@ -44,7 +44,9 @@ def _cli_build(argv: list[str]) -> int:
                              "with photos from XPME or AutoOrtho (see --target)")
     parser.add_argument("--resolution", choices=["1", "13", "3"], default="1",
                         help="1 = 1\" (30 m), 13 = 1/3\" (10 m where available), 3 = 3\" (90 m)")
-    parser.add_argument("--mesh", choices=[m.key for m in MESH_DETAILS], default="high")
+    parser.add_argument("--mesh", choices=["auto"] + [m.key for m in MESH_DETAILS], default="auto",
+                        help="auto = per tile from the terrain (Maximum in high mountains, High in "
+                             "hills, Balanced on flat land)")
     parser.add_argument("--xplane", type=Path, help="X-Plane 12 folder (auto-detected)")
     parser.add_argument("--target", choices=["official", "xpme", "autoortho", "custom_scenery"], default="autoortho",
                         help="'rebuild' only: official = official aerial photos (Bavaria/Austria/"

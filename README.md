@@ -60,7 +60,7 @@ what was measured on a real tile: around Innsbruck XPME's mesh has 1.6 million t
 **Which one should I use?**
 
 * **Build a new, denser mesh** where you actually fly in the mountains — this is where LiDAR
-  shows its full detail. Pick *1″* resolution and *High* mesh detail; with your own 10 m data
+  shows its full detail. Pick *1″* resolution and *Automatic* mesh detail; with your own 10 m data
   (see below) *1/3″*.
 * **Improve my current terrain** for large areas around it: in minutes per tile you get correct
   heights everywhere while keeping XPME's water, roads and airport flattening.
@@ -153,7 +153,7 @@ tile never stops the others; *Retry failed tiles* rebuilds just those.
    * *Remove selected from X-Plane…* takes tiles out of this app's packs again — X-Plane then shows
      XPME there as before.
 4. **Step 2 – Method & resolution:** choose the method (see above), 1″ (≈30 m), and for a new mesh
-   the detail (*High* recommended).
+   the detail (*Automatic* recommended).
 5. **Step 3 – Create:** for a new mesh choose *Custom Scenery, photos from XPME*, then
    *Create & Install*. The log shows every step; the remaining time is learned from your PC.
 6. **Fly.** The app does not need to run while flying — XPME does (it delivers the photos).
@@ -176,7 +176,7 @@ tile never stops the others; *Retry failed tiles* rebuilds just those.
 |---|---|---|
 | Method | **Improve** · **New mesh** | See the comparison above. |
 | DEM resolution | **1″** (≈30 m) · **1/3″** (≈10 m) · **3″** (≈90 m) | 1/3″ only pays off where 1–10 m data covers the tile (USA, NZ, Japan, parts of Canada, or your own files); elsewhere it falls back to 1″. 3″ is resampled from 1″. |
-| Mesh detail (new mesh) | **Balanced** · **High** · **Maximum** | More triangles in steep terrain. *High* ≈ 2× XPME's triangles, *Maximum* another 30–50 %. |
+| Mesh detail (new mesh) | **Automatic** · **High** · **Maximum** | *Automatic* (recommended) chooses per tile from the mean terrain slope: *Maximum* in high mountains (≥ 20°), *High* in hills and most of the Alps, *Balanced* on flat land. *High* ≈ 2× XPME's triangles, *Maximum* another 30–50 %. |
 | Where to install (new mesh) | **Photos from XPME** · AutoOrtho's folder · Custom Scenery with AutoOrtho photos | XPME is preselected when it is found in `scenery_packs.ini`. |
 | Tiles at the same time | Automatic / 1 – 8 | *Automatic* picks the best value from CPU threads and RAM. |
 | Own elevation files | optional folder | Your own GeoTIFFs (any projection), `.hgt`, Sonny `.zip` (also the 0.5″ / 10 m models of Austria and Switzerland, zips work as they are), FABDEM. Used first; missing tiles are downloaded. |

@@ -15,7 +15,7 @@ class Settings:
     install_target: str = "autoortho"  # new mesh: "official"/"xpme" photos, "autoortho" folder or "custom_scenery"
     photo_zl: int = 17  # official photos: zoom level
     resolution: str = "1"
-    mesh_detail: str = "high"
+    mesh_detail: str = "auto"
     parallel: int = 0  # 0 = automatic (recommended for this PC)
     local_dem_folder: str = ""
     last_region: str = "tyrol"

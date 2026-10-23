@@ -23,7 +23,7 @@ from .. import APP_NAME, __version__, paths, regions
 from ..dem import ATTRIBUTION, RESOLUTIONS
 from ..installer import InstallTarget, pack_name
 from ..inventory import Inventory, scan
-from ..pipeline import MESH_DETAILS, BuildRequest, BuildResult, Events, Pipeline, mesh_detail
+from ..pipeline import MESH_CHOICES, BuildRequest, BuildResult, Events, Pipeline, mesh_detail
 from ..settings import Settings
 from ..xplane import find_xplane12_installs, is_xplane12, read_autoortho_config
 from .map_widget import TileMap
@@ -723,7 +723,7 @@ class MainWindow(QMainWindow):
         self.mesh_group = QButtonGroup(self)
         self.mesh_cards: list[OptionCard] = []
         row = QHBoxLayout()
-        for detail in MESH_DETAILS:
+        for detail in MESH_CHOICES:
             card = OptionCard(detail.label, detail.description, self.mesh_group, detail.key)
             self.mesh_cards.append(card)
             row.addWidget(card)
@@ -791,7 +791,7 @@ class MainWindow(QMainWindow):
         for card in self.mesh_cards:
             if card.radio.isChecked():
                 return card.key
-        return "high"
+        return "auto"
 
     # ------------------------------------------------------------------
     # Page 3: create
@@ -999,7 +999,8 @@ class MainWindow(QMainWindow):
         method = self._method_key()
         minutes = self._minutes(len(tiles))
         download_mb = _DOWNLOAD_MB.get(res.key, 25) * len(tiles)
-        per_tile = _IMPROVE_MB if method == "improve" else _PACK_MB[(res.key, detail.key)]
+        estimate_key = "high" if detail.key == "auto" else detail.key
+        per_tile = _IMPROVE_MB if method == "improve" else _PACK_MB[(res.key, estimate_key)]
         disk_mb = per_tile * len(tiles)
         if self._photos() == "official":
             disk_mb += int(_PHOTO_GB[self._photo_zl()] * 1024 * len(tiles))
@@ -1130,7 +1131,8 @@ class MainWindow(QMainWindow):
         elif self._method_key() == "improve":
             per_tile = _IMPROVE_MINUTES[self._res_key()]
         else:
-            per_tile = _MINUTES[(self._res_key(), self._mesh_key())]
+            mesh = self._mesh_key()
+            per_tile = _MINUTES[(self._res_key(), "high" if mesh == "auto" else mesh)]
         # tiles built side by side; a single tile is never faster than one build
         return per_tile * math.ceil(count / max(1, self._parallel())) if count else 0.0
 
@@ -1468,8 +1470,10 @@ class MainWindow(QMainWindow):
         s = self.settings
         for card in self.res_cards:
             card.radio.setChecked(card.key == s.resolution)
+        keys = [card.key for card in self.mesh_cards]
+        wanted = s.mesh_detail if s.mesh_detail in keys else "auto"  # "balanced" is automatic now
         for card in self.mesh_cards:
-            card.radio.setChecked(card.key == s.mesh_detail)
+            card.radio.setChecked(card.key == wanted)
         index = self.parallel_combo.findData(max(0, min(8, s.parallel)))
         self.parallel_combo.setCurrentIndex(max(0, index))
         self.dem_folder_edit.setText(s.local_dem_folder)

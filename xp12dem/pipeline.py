@@ -49,11 +49,48 @@ WORKER_EXE = "xp12dem-worker"
 
 
 
+AUTO_DETAIL = MeshDetail("auto", "Automatic", 1.2, 4,
+                         "Per tile from the terrain: Maximum in high mountains, High in hills, "
+                         "Balanced on flat land. Recommended.")
+# what the user picks from; "balanced" stays available to the automatic choice and the CLI
+MESH_CHOICES: tuple[MeshDetail, ...] = (AUTO_DETAIL, MESH_DETAILS[1], MESH_DETAILS[2])
+
+
 def mesh_detail(key: str) -> MeshDetail:
+    if key == "auto":
+        return AUTO_DETAIL
     for detail in MESH_DETAILS:
         if detail.key == key:
             return detail
     raise KeyError(key)
+
+
+def terrain_slope(dem_file: Path, lat: int) -> float:
+    """Mean slope (degrees) of the land in a tile, on a ~90 m grid."""
+    import math
+
+    import numpy as np
+
+    n = Path(dem_file).stat().st_size // 2
+    size = int(round(math.sqrt(n)))
+    grid = np.memmap(dem_file, ">i2", "r", shape=(size, size))
+    step = max(1, (size - 1) // 1200)
+    g = np.asarray(grid[::step, ::step], np.float32)
+    g[g < -1000] = np.nan
+    dy = 111_320.0 / (g.shape[0] - 1)
+    dx = dy * math.cos(math.radians(lat + 0.5))
+    gy, gx = np.gradient(g, dy, dx)
+    slope = np.degrees(np.arctan(np.hypot(gx, gy)))
+    land = np.isfinite(slope) & (g > 0.5)
+    return float(slope[land].mean()) if land.any() else 0.0
+
+
+def auto_detail(dem_file: Path, lat: int) -> tuple[MeshDetail, float]:
+    """Mesh detail for one tile: dense only where the terrain needs it.
+    (Budapest ~3 deg, Innsbruck ~18 deg, Dolomites ~24 deg mean slope.)"""
+    slope = terrain_slope(dem_file, lat)
+    key = "maximum" if slope >= 20 else "high" if slope >= 6 else "balanced"
+    return mesh_detail(key), slope
 
 
 OSM_FAILED_TEXT = "OpenStreetMap data could not be downloaded"
@@ -286,7 +323,7 @@ class Pipeline:
             else:
                 futures = {
                     pool.submit(self._build_tile, tile, dem_files[tile], build_root,
-                                global_scenery, detail): tile
+                                global_scenery, self._detail_for(tile, dem_files[tile], detail)): tile
                     for tile in todo
                 }
             for future in as_completed(futures):
@@ -320,7 +357,8 @@ class Pipeline:
         improve = req.method == "improve"
         assemble_pack(tile_dirs, staged, region_name=req.region_name,
                       resolution_label=res.label,
-                      mesh_label="unchanged (existing mesh)" if improve else detail.label,
+                      mesh_label=("unchanged (existing mesh)" if improve else
+                                  "Automatic (per tile)" if detail.key == "auto" else detail.label),
                       sources=({t: sources[t].label for t in tile_dirs} if improve else
                                {t: photo_packs[t][0] for t in tile_dirs} if photo_packs else None),
                       dem_sources={t: self.dem_sources.get(t, "") for t in tile_dirs},
@@ -373,6 +411,16 @@ class Pipeline:
         if self.eta is not None:
             elapsed = self.eta.elapsed()
             self.events.progress(elapsed, elapsed + self.eta.remaining())
+
+    def _detail_for(self, tile: Tile, dem_file: Path, detail: MeshDetail) -> MeshDetail:
+        if detail.key != "auto":
+            return detail
+        try:
+            chosen, slope = auto_detail(dem_file, tile[0])
+        except (OSError, ValueError):
+            chosen, slope = mesh_detail("high"), float("nan")
+        self.events.log(f"{tile_name(*tile)}: mesh detail {chosen.label} (mean slope {slope:.0f}°)")
+        return chosen
 
     def _build_tile(self, tile: Tile, dem_file: Path, build_root: Path,
                     global_scenery: Path, detail: MeshDetail) -> Path:
