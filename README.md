@@ -69,6 +69,35 @@ what was measured on a real tile: around Innsbruck XPME's mesh has 1.6 million t
 * Where only satellite data exists (red tiles on the map, e.g. Hungary, the Balkans) the heights
   are no better than XPME's — a new mesh is still denser there, but the gain is small.
 
+## In the simulator
+
+Real screenshots from X-Plane 12 with XPME's photos (Cessna 172, Courchevel LFLJ and Innsbruck LOWI).
+
+**Courchevel, same spot in the cockpit — XPME (top) and the new LiDAR mesh (bottom).** Look at the
+ridges on the left, the rock faces behind the hotel and the slope on the right: the new mesh has
+the shape of the real terrain, XPME's is rounded off.
+
+![Courchevel with XPME's terrain](docs/img/example_courchevel_xpme.jpg)
+![Courchevel with the new LiDAR mesh](docs/img/example_courchevel_new_mesh.jpg)
+
+**Courchevel, new mesh from outside the aircraft** — the runway keeps its real 18 % climb, the
+terrain around it its edges and gullies.
+
+![Courchevel, new mesh](docs/img/example_courchevel_mesh_view.jpg)
+
+**Aprons on a sloped airfield.** Ortho4XP on its own leaves aprons on the terrain, so at
+Courchevel the parked aircraft stood tilted (left). The app lays aprons as nearly level planes
+(right) while the runway stays steep.
+
+| Before apron levelling | With apron levelling |
+|---|---|
+| ![Aircraft tilted on the apron](docs/img/example_apron_tilted.jpg) | ![Aircraft level on the apron](docs/img/example_apron_level.jpg) |
+
+**Innsbruck (LOWI), new mesh with XPME's photos** — the Nordkette on the right and the peaks
+south of the valley.
+
+![Innsbruck with the new mesh](docs/img/example_innsbruck.jpg)
+
 ## How it works
 
 ### Improve my current terrain
