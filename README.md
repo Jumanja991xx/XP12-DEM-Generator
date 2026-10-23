@@ -71,7 +71,7 @@ what was measured on a real tile: around Innsbruck XPME's mesh has 1.6 million t
 
 ## In the simulator
 
-Real screenshots from X-Plane 12 with XPME's photos (Cessna 172, Courchevel LFLJ and Innsbruck LOWI).
+Real screenshots from X-Plane 12 with XPME's photo textures (Cessna 172, Courchevel LFLJ and Innsbruck LOWI).
 
 **Courchevel, same spot in the cockpit — XPME (top) and the new LiDAR mesh (bottom).** Look at the
 ridges on the left, the rock faces behind the hotel and the slope on the right: the new mesh has
@@ -128,7 +128,7 @@ X-Plane. The app ships Ortho4XP (unmodified, GPL v3) and runs it without its win
 | Vector data | One Overpass (OpenStreetMap) server, often busy | Rotates through six Overpass servers, retries, caches the result, explains failures |
 | Mesh | Triangle4XP with your settings | Same Triangle4XP, with tested presets: *Balanced / High / Maximum* (`curvature_tol` 2.0 / 1.2 / 0.8, up to 3 / 4 / 5 M triangles) |
 | Airports | Runways and taxiways follow a fitted height profile, aprons follow the blurred terrain — on sloped airfields parked aircraft stand tilted | Same runway profiles, **aprons laid as planes with at most 1.5 % slope** |
-| Photos | Downloads and converts every photo (tens of GB per region) | **Downloads no photos at all**: the terrain files point straight at XPME's `textures/` folder (or at AutoOrtho's), which streams them while you fly. Same names, same tiling (Bing, zoom 16, zoom 18 around airports) |
+| Photos | Downloads and converts every photo (tens of GB per region) | **Downloads no photos at all**: the terrain files point straight at XPME's `textures/` folder (or at AutoOrtho's), which streams them while you fly. Same file names and tiling as XPME (zoom 16, zoom 18 around airports) |
 | Install | Copy folders, sort `scenery_packs.ini` by hand | Installs into Custom Scenery, lists the pack above XPME and above `z_dem_*` packs, keeps a backup of the ini |
 
 Each tile is built in its own worker process (several at once on a strong PC), so one failing
