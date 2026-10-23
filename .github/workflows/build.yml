@@ -175,6 +175,7 @@ jobs:
           & $iscc "/DMyAppVersion=$version" packaging\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
           Copy-Item "dist\XP12DEMGenerator-Setup-$version.exe" "XP12DEMGenerator-Setup.exe"
+          "APP_VERSION=$version" >> $env:GITHUB_ENV
           "Installer: $((Get-Item XP12DEMGenerator-Setup.exe).Length / 1MB) MB"
       - name: Smoke test - silent install and uninstall
         shell: pwsh
@@ -194,6 +195,18 @@ jobs:
         with:
           name: XP12DEMGenerator-windows
           path: XP12DEMGenerator-windows.zip
+      - name: Publish release (commit on main marked [release])
+        # creates tag v<version> from xp12dem/__init__.py - for when tags cannot be pushed
+        if: github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release]')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.APP_VERSION }}
+          target_commitish: ${{ github.sha }}
+          name: XP12 DEM Generator ${{ env.APP_VERSION }}
+          body_path: packaging/release_notes.md
+          files: |
+            XP12DEMGenerator-Setup.exe
+            XP12DEMGenerator-windows.zip
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
