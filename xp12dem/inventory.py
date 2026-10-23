@@ -34,6 +34,7 @@ class InstalledPack:
     misplaced: bool = False  # stored outside Custom Scenery (e.g. in XPME's folder) - should move
     broken: dict[Tile, list[str]] = field(default_factory=dict)  # tile -> missing terrain files
     overridden_by: str = ""  # a pack it improves is listed above it (e.g. after XPME re-sorted the ini)
+    no_raster: list[Tile] = field(default_factory=list)  # new-mesh tiles without XP12 elevation raster
 
     def describe(self) -> str:
         what = "improved terrain" if self.method == "improve" else "new mesh"
@@ -62,7 +63,8 @@ class Inventory:
     def needs_fix(self) -> list[InstalledPack]:
         """Inactive packs, packs in a folder another tool manages (XPME), packs with
         tiles X-Plane refuses (missing terrain files)."""
-        return [p for p in self.packs if not p.enabled or p.misplaced or p.broken or p.overridden_by]
+        return [p for p in self.packs
+                if not p.enabled or p.misplaced or p.broken or p.overridden_by or p.no_raster]
 
     def active_on(self, tile: Tile) -> bool:
         return any(p.enabled and not p.overridden_by and tile not in p.broken
@@ -105,15 +107,16 @@ def read_pack(path: Path, enabled: bool = True) -> Optional[InstalledPack]:
     present = set(_tiles_from_dsfs(path))
     if not present:
         return None
-    method = manifest.get("method") or ("improve" if path.name.lower().startswith(IMPROVE_PREFIX)
-                                        else "rebuild")
+    method = manifest.get("method") or ("improve" if _rank(path.name) == 1
+                                        and path.name.lower().startswith(IMPROVE_PREFIX) else "rebuild")
     improves = sorted(set(manifest.get("sources", {}).values())) if isinstance(manifest.get("sources"), dict) else []
     return InstalledPack(name=path.name, path=path, method=method,
                          resolution=manifest.get("resolution", ""), tiles=sorted(present),
                          elevation_sources=dict(manifest.get("elevation_sources", {})),
                          built=manifest.get("built", ""), enabled=enabled,
                          improves=[i for i in improves if not i.startswith("X-Plane 12 Global")],
-                         broken=_broken_tiles(path))
+                         broken=_broken_tiles(path),
+                         no_raster=_tiles_without_raster(path) if method != "improve" else [])
 
 
 def _broken_tiles(pack: Path) -> dict[Tile, list[str]]:
@@ -132,9 +135,55 @@ def _broken_tiles(pack: Path) -> dict[Tile, list[str]]:
     return broken
 
 
+def _tiles_without_raster(pack: Path) -> list[Tile]:
+    """New-mesh tiles built before version 0.2 without Global Scenery: no XP12 elevation
+    raster, X-Plane then computes one while loading - for hours."""
+    from .dsf_raster import has_elevation
+
+    tiles = []
+    for dsf in (pack / "Earth nav data").glob("*/*.dsf"):
+        try:
+            tile = parse_tile(dsf.stem)
+        except ValueError:
+            continue
+        if has_elevation(dsf) is False:
+            tiles.append(tile)
+    return sorted(tiles)
+
+
+def cached_dem_file(cache_dir: Path, tile: Tile, resolution: str = "") -> Optional[Path]:
+    """The downloaded elevation file of a tile, preferring the pack's resolution."""
+    from .regions import hgt_name
+
+    prefix = {"1/3": "13s", "1 ": "1s", '1"': "1s", "3 ": "3s", '3"': "3s"}
+    folders = [f for key, f in prefix.items() if resolution.startswith(key)] + ["1s", "13s", "3s"]
+    for folder in dict.fromkeys(folders):
+        base = Path(cache_dir) / folder
+        for path in [base / f"{hgt_name(*tile)}.hgt", *base.glob(f"*/{hgt_name(*tile)}.hgt")]:
+            if path.is_file() and path.stat().st_size > 1000:
+                return path
+    return None
+
+
+def add_rasters(pack: InstalledPack, cache_dir: Path) -> list[Tile]:
+    """Write the missing elevation rasters from the cached DEMs; returns tiles left without."""
+    from .dsf_raster import add_to_dsf
+    from .regions import dsf_relpath
+
+    left = []
+    for tile in pack.no_raster:
+        dem = cached_dem_file(cache_dir, tile, pack.resolution)
+        if dem is None:
+            left.append(tile)
+            continue
+        add_to_dsf(pack.path / dsf_relpath(*tile), dem)
+    pack.no_raster = left
+    return left
+
+
 def remove_tiles(pack: InstalledPack, tiles) -> None:
     """Delete tiles from a pack (their original terrain shows again)."""
-    from .reheight import dsf_relpath
+    from .regions import dsf_relpath
 
     for lat, lon in tiles:
         (pack.path / dsf_relpath(lat, lon)).unlink(missing_ok=True)

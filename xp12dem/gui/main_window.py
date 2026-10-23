@@ -520,6 +520,13 @@ class MainWindow(QMainWindow):
                     why.append(f"{len(p.broken)} tile(s) miss terrain files ({names}{more}), so X-Plane "
                                "refuses the whole pack - Fix now takes them out (they show XPME's "
                                "terrain again); select them and build again")
+                if p.no_raster:
+                    names = ", ".join(regions.tile_name(*t) for t in p.no_raster[:6])
+                    more = f" … (+{len(p.no_raster) - 6})" if len(p.no_raster) > 6 else ""
+                    why.append(f"{len(p.no_raster)} tile(s) lack the X-Plane 12 elevation raster "
+                               f"({names}{more}) - X-Plane then computes it while loading, which can "
+                               "hang at 'finishing asynchronous loading' for hours. Fix now adds it "
+                               "from your downloaded elevation data in a few seconds")
                 lines.append(f"<b>{p.name}</b> ({len(p.tiles)} tiles): " + "; ".join(why))
             self.inactive_label.setText(
                 "<span style='color:#ff9a1f'><b>⚠ Needs a fix:</b> " + "<br>".join(lines)
@@ -535,8 +542,17 @@ class MainWindow(QMainWindow):
         errors, moved = [], []
         # several copies of one name: merge all into Custom Scenery/<name>
         removed: list = []
+        no_dem: list = []
+        rasters = 0
         for pack in self.inventory.needs_fix():
             try:
+                if pack.no_raster:
+                    from ..inventory import add_rasters
+
+                    todo = len(pack.no_raster)
+                    left = add_rasters(pack, paths.dem_cache_dir())
+                    rasters += todo - len(left)
+                    no_dem += left
                 if pack.broken:
                     from ..inventory import remove_tiles
 
@@ -560,6 +576,10 @@ class MainWindow(QMainWindow):
                 self.map.set_selected(sorted(set(removed)))
             QMessageBox.information(
                 self, APP_NAME, "Done.\n\n" + ("\n".join(moved) + "\n\n" if moved else "")
+                + (f"X-Plane 12 elevation raster added to {rasters} tile(s) - they load normally "
+                   "again.\n\n" if rasters else "")
+                + (f"No downloaded elevation data for {', '.join(regions.tile_name(*t) for t in no_dem)}"
+                   " - build these tiles again to add the elevation raster.\n\n" if no_dem else "")
                 + (f"{len(set(removed))} incomplete tile(s) were taken out and are now selected - "
                    "start XPME, wait until it has finished loading, then build them again "
                    "(Next).\n\n" if removed else "")

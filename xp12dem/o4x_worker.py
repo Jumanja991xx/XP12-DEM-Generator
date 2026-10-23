@@ -340,7 +340,16 @@ def run_job(job: dict) -> int:
             return 2
         emit("step_done", step=key, seconds=round(time.time() - started, 1))
 
-    emit("done", dsf=FNAMES.dsf_file(tile.build_dir, lat, lon))
+    # X-Plane 12 needs an elevation raster in every mesh DSF - without one it
+    # computes it from the triangles while loading, which can take hours.
+    from xp12dem import dsf_raster
+
+    dsf = FNAMES.dsf_file(tile.build_dir, lat, lon)
+    try:
+        emit("log", message="XP12 " + dsf_raster.add_to_dsf(Path(dsf), Path(job["dem_file"])))
+    except (OSError, ValueError) as exc:
+        emit("warning", message=f"could not write the XP12 elevation raster: {exc}")
+    emit("done", dsf=dsf)
     return 0
 
 

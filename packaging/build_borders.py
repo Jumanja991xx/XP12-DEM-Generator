@@ -15,7 +15,7 @@ from pathlib import Path
 from shapely.geometry import LineString, MultiPolygon, Polygon, mapping
 from shapely.ops import linemerge, polygonize, unary_union
 
-RELATIONS = {"austria": 16239, "tirol": 52343}
+RELATIONS = {"austria": 16239, "tirol": 52343, "suedtirol": 47046}
 TOLERANCE = 0.00008  # ~6-9 m
 
 

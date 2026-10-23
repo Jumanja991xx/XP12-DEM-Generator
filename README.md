@@ -251,6 +251,10 @@ Run `XP12DEMGenerator.exe build --help` for all options (`--resolution`, `--xpla
 
 * **"XPME is not running (or still loading)"** — start XPME, wait until it has finished loading,
   click *Check again* / build again. Nothing was installed in the meantime.
+* **X-Plane hangs at "Finishing asynchronous loading"** with a new mesh built by version 0.1 —
+  those tiles lack the X-Plane 12 elevation raster when the tile's default scenery is not
+  installed, and X-Plane computes it from millions of triangles while loading. Open the app:
+  step 1 shows *Needs a fix* → *Fix now* adds the raster in seconds. New builds always include it.
 * **Old terrain still visible** — on step 1 look for *Needs a fix* and click *Fix now*. Or check
   that `z_dem_mesh_…` / `z_dem_…` are listed above `XPME_…` in `Custom Scenery\scenery_packs.ini`
   (and `z_dem_mesh_…` above `z_dem_…`).
