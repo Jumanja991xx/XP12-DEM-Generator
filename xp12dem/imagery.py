@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
 R = 20037508.342789244  # half the web-mercator extent (m)
 TEX_TILES = 16          # web-mercator tiles per texture side
@@ -98,6 +98,71 @@ def textures_of(ter_dir: Path) -> list[TextureId]:
 
 
 # ---------------------------------------------------------------------------
+# Areas (keep each source inside its own country / state) and colour curves
+# ---------------------------------------------------------------------------
+_RESOURCES = Path(__file__).with_name("resources")
+_areas: dict = {}
+_curves: Optional[dict] = None
+
+
+def area(name: str):
+    """Shapely outline of a named area from resources/borders.json (lon/lat)."""
+    if name not in _areas:
+        import json
+
+        from shapely.geometry import shape
+
+        data = json.loads((_RESOURCES / "borders.json").read_text("utf-8"))
+        _areas[name] = shape(data["areas"][name]["geometry"])
+    return _areas[name]
+
+
+def colour_curve(key: str) -> Optional[np.ndarray]:
+    """3 x 256 tone curve mapping a source to the common look (None = unchanged)."""
+    global _curves
+    if _curves is None:
+        import json
+
+        try:
+            _curves = json.loads((_RESOURCES / "photo_colours.json").read_text("utf-8"))["curves"]
+        except (OSError, ValueError, KeyError):
+            _curves = {}
+    curve = _curves.get(key)
+    return None if curve is None else np.asarray(curve, np.float32)
+
+
+def area_mask(tex: TextureId, name: str) -> np.ndarray:
+    """uint8 mask (255 = inside) of an area over a texture block."""
+    from shapely.geometry import box
+
+    x0, y0, x1, y1 = tex.lonlat_bbox()
+    clip = area(name).intersection(box(x0, y0, x1, y1))
+    img = Image.new("L", (TEX_PX, TEX_PX), 0)
+    if clip.is_empty:
+        return np.asarray(img)
+    mx0, my0, mx1, my1 = tex.merc_bbox()
+    sx, sy = TEX_PX / (mx1 - mx0), TEX_PX / (my1 - my0)
+
+    def pix(coords):
+        out = []
+        for lon, lat in coords:
+            mx = lon / 180 * R
+            my = math.log(math.tan((90 + lat) * math.pi / 360)) * R / math.pi
+            out.append(((mx - mx0) * sx, (my1 - my) * sy))
+        return out
+
+    draw = ImageDraw.Draw(img)
+    polys = getattr(clip, "geoms", [clip])
+    for poly in polys:
+        if poly.geom_type != "Polygon":
+            continue
+        draw.polygon(pix(poly.exterior.coords), fill=255)
+        for hole in poly.interiors:
+            draw.polygon(pix(hole.coords), fill=0)
+    return np.asarray(img)
+
+
+# ---------------------------------------------------------------------------
 # Photo layers
 # ---------------------------------------------------------------------------
 class Layer:
@@ -107,8 +172,25 @@ class Layer:
     label = ""
     credit = ""
     bounds: tuple[float, float, float, float] = (-180, -85, 180, 85)  # lon/lat, cheap pre-check
-    gain = np.ones(3, np.float32)   # colour correction towards the common look
-    bias = np.zeros(3, np.float32)
+    inside: Optional[str] = None   # only use the source within this area ...
+    outside: Optional[str] = None  # ... or never within this one
+
+    @property
+    def lut(self) -> Optional[np.ndarray]:
+        return colour_curve(self.key)
+
+    def restrict(self, tex: TextureId, rgba: np.ndarray) -> np.ndarray:
+        """Cut the source back to its own area (sources often reach a little beyond)."""
+        if self.inside is None and self.outside is None:
+            return rgba
+        alpha = rgba[..., 3]
+        if self.inside is not None:
+            alpha = np.minimum(alpha, area_mask(tex, self.inside))
+        if self.outside is not None:
+            alpha = np.minimum(alpha, 255 - area_mask(tex, self.outside))
+        out = rgba.copy()
+        out[..., 3] = alpha
+        return out
 
     def covers(self, tex: TextureId) -> bool:
         x0, y0, x1, y1 = tex.lonlat_bbox()
@@ -158,17 +240,20 @@ class BavariaDOP(WmsLayer):
     label = "Bavaria DOP40 (40 cm)"
     credit = "Bayerische Vermessungsverwaltung, www.geodaten.bayern.de, CC BY 4.0"
     bounds = (8.95, 47.25, 13.85, 50.57)
+    outside = "austria"  # the service shows a few km of Austria, from other flights
     url = "https://geoservices.bayern.de/od/wms/dop/v1/dop40"
     layer = "by_dop40c"
 
 
 class TirolOrtho(WmsLayer):
     key = "tirol"
-    label = "Land Tirol orthophoto (20 cm)"
+    label = "Land Tirol orthophoto 2016-2018 (20 cm)"
     credit = "Land Tirol, data.tirol.gv.at, CC BY 4.0"
     bounds = (10.09, 46.65, 12.97, 47.75)
+    inside = "tirol"
     url = "https://gis.tirol.gv.at/arcgis/services/Service_Public/orthofoto/MapServer/WMSServer"
-    layer = "Image_Aktuell_RGB"
+    # one complete flight campaign: "Image_Aktuell_RGB" mixes years with visible seams
+    layer = "Image_2016_2018"
     version = "1.3.0"
 
 
@@ -219,6 +304,7 @@ class BasemapAT(XyzLayer):
     label = "basemap.at orthophoto (Austria)"
     credit = "basemap.at, CC BY 4.0"
     bounds = (9.45, 46.35, 17.20, 49.05)
+    inside = "austria"
     template = "https://mapsneu.wien.gv.at/basemap/bmaporthofoto30cm/normal/google3857/{z}/{y}/{x}.jpeg"
     max_zl = 19
 
@@ -327,33 +413,61 @@ class Fetcher:
 # ---------------------------------------------------------------------------
 # Compositing
 # ---------------------------------------------------------------------------
-FEATHER_PX = 48  # ~40 m at zoom 17: width of the soft seam between two sources
+FEATHER_PX = 96  # ~80 m at zoom 17: width of the soft seam between two sources
 
 
 def correct(rgb: np.ndarray, layer: Layer) -> np.ndarray:
-    if np.all(layer.gain == 1) and np.all(layer.bias == 0):
+    lut = layer.lut
+    if lut is None:
         return rgb.astype(np.float32)
-    return rgb.astype(np.float32) * layer.gain + layer.bias
+    out = np.empty(rgb.shape, np.float32)
+    for c in range(3):
+        out[..., c] = lut[c][rgb[..., c]]
+    return out
+
+
+def _match_local(rgb: np.ndarray, alpha: np.ndarray, done: np.ndarray, have: np.ndarray) -> np.ndarray:
+    """Fit a weaker source to what is already there where both have data: photos of
+    different flights differ in light, a global curve cannot catch that."""
+    both = (alpha > 0) & (have > 0.99)
+    if both.sum() < 20000:
+        return rgb
+    src = rgb[both]
+    dst = done[both] / have[both][:, None]
+    s_mean, d_mean = src.mean(0), dst.mean(0)
+    scale = np.clip(dst.std(0) / np.maximum(src.std(0), 1e-3), 0.75, 1.35)
+    return (rgb - s_mean) * scale + d_mean
 
 
 def composite(parts: list[tuple[Layer, np.ndarray]]) -> tuple[np.ndarray, float]:
-    """Best source first. Returns RGB uint8 and the share of pixels without any data."""
+    """Best source first. Returns RGB uint8 and the share of pixels without any data.
+
+    Where a weaker source also has data, the better one fades out softly over
+    FEATHER_PX; where it has none (e.g. exactly at a state border), the edge
+    stays sharp so no gap opens - the colour curves make both sides match.
+    """
     out = np.zeros((TEX_PX, TEX_PX, 3), np.float32)
     have = np.zeros((TEX_PX, TEX_PX), np.float32)  # accumulated weight (0..1)
-    for layer, rgba in parts:
+    below = [None] * len(parts)  # union of the data of all weaker sources
+    acc = np.zeros((TEX_PX, TEX_PX), bool)
+    for i in range(len(parts) - 1, -1, -1):
+        below[i] = acc.copy()
+        acc |= parts[i][1][..., 3] > 0
+    for (layer, rgba), lower in zip(parts, below):
         alpha = rgba[..., 3]
         if not alpha.any():
             continue
-        # soft edge: fade a source out over FEATHER_PX inside its own outline
-        mask = Image.fromarray(alpha)
-        if alpha.min() < 255:
-            eroded = mask.filter(ImageFilter.MinFilter(9))
+        hard = alpha.astype(np.float32) / 255
+        if alpha.min() < 255 and lower.any():
+            eroded = Image.fromarray(alpha).filter(ImageFilter.MinFilter(9))
             soft = np.asarray(eroded.filter(ImageFilter.GaussianBlur(FEATHER_PX / 2)), np.float32) / 255
-            weight = np.minimum(soft, alpha / 255.0)
+            weight = np.where(lower, np.minimum(soft, hard), hard)
         else:
-            weight = np.ones(alpha.shape, np.float32)
+            weight = hard
         take = weight * (1 - have)
-        out += correct(rgba[..., :3], layer) * take[..., None]
+        rgb = correct(rgba[..., :3], layer)
+        rgb = _match_local(rgb, alpha, out, have)
+        out += rgb * take[..., None]
         have += take
         if have.min() > 0.999:
             break
@@ -429,6 +543,9 @@ def build_textures(textures: Iterable[TextureId], out_dir: Path, layers: list[La
                 continue
             rgba = layer.fetch(tex, fetcher)
             if rgba is None:
+                continue
+            rgba = layer.restrict(tex, rgba)
+            if not rgba[..., 3].any():
                 continue
             parts.append((layer, rgba))
             stats["sources"][layer.key] += 1
