@@ -473,7 +473,7 @@ def composite(parts: list[tuple[Layer, np.ndarray]]) -> tuple[np.ndarray, float]
             break
     missing = float((have < 0.5).mean())
     if have.min() < 0.999:  # fill what nobody covers with the average colour
-        fill = (out.sum((0, 1)) / max(have.sum(), 1)).astype(np.float32)
+        fill = (out.sum((0, 1), dtype=np.float64) / max(float(have.sum(dtype=np.float64)), 1.0)).astype(np.float32)
         out += fill * (1 - have)[..., None]
     return np.clip(out, 0, 255).astype(np.uint8), missing
 
