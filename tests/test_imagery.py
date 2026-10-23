@@ -27,7 +27,21 @@ def test_composite_prefers_first_source_and_fills_gaps():
     a = np.zeros((I.TEX_PX, I.TEX_PX, 4), np.uint8)
     a[:, : I.TEX_PX // 2] = (200, 0, 0, 255)          # left half: source A
     b = np.zeros_like(a)
-    b[...] = (0, 0, 200, 255)                          # everywhere: source B
+    b[:, I.TEX_PX // 2:] = (0, 0, 200, 255)            # right half: source B (no overlap)
     rgb, missing = I.composite([(I.Layer(), a), (I.Layer(), b)])
     assert missing == 0
     assert tuple(rgb[100, 100]) == (200, 0, 0) and tuple(rgb[100, -100]) == (0, 0, 200)
+    rgb, missing = I.composite([(I.Layer(), a)])
+    assert 0.49 < missing < 0.51 and tuple(rgb[100, -100]) == (200, 0, 0)  # gap: average colour
+
+
+def test_weaker_source_is_fitted_to_the_better_one_where_both_overlap():
+    rng = np.random.default_rng(3)
+    ground = rng.integers(40, 200, (I.TEX_PX, I.TEX_PX, 3)).astype(np.uint8)
+    a = np.dstack([ground, np.full(ground.shape[:2], 255, np.uint8)])
+    a[:, I.TEX_PX // 2:, 3] = 0                        # A ends in the middle
+    darker = (ground * 0.6).astype(np.uint8)            # B: same ground, other flight
+    b = np.dstack([darker, np.full(ground.shape[:2], 255, np.uint8)])
+    rgb, _ = I.composite([(I.Layer(), a), (I.Layer(), b)])
+    right = rgb[:, -500:].astype(float).mean()
+    assert abs(right - ground[:, -500:].astype(float).mean()) < 4  # B brought up to A's level
