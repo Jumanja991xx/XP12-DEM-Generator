@@ -1,13 +1,12 @@
 # XP12 DEM Generator
 
-**High-resolution LiDAR terrain for X-Plane 12 in a few clicks — for XPME, AutoOrtho and
-default-scenery users alike.**
+**Sharper, more accurate mountains for X-Plane 12 — built from laser-scan (LiDAR) elevation
+data, installed in a few clicks, working together with XPME, AutoOrtho or the default scenery.**
 
-XP12 DEM Generator downloads accurate elevation data — [Sonny's LiDAR Digital Terrain Models of
-Europe](https://sonny.4lima.de), USGS 3DEP for the USA and FABDEM for the rest of the world — and
-puts it into the X-Plane 12 terrain you already fly with:
-X-Plane Map Enhancement (XPME), AutoOrtho, Ortho4XP tiles or X-Plane's default scenery.
-No Ortho4XP knowledge, no copying folders, no editing `scenery_packs.ini`.
+A free Windows app (also runs on Linux) for private use. It downloads the best free elevation
+data for the area you pick — LiDAR surveys for most of the Alps and Europe, USGS 3DEP for the
+USA, and more — and turns it into X-Plane terrain. No Ortho4XP knowledge, no copying folders, no
+editing `scenery_packs.ini`.
 
 | 1. Choose a region | 2. Choose method and DEM resolution |
 |---|---|
@@ -15,128 +14,155 @@ No Ortho4XP knowledge, no copying folders, no editing `scenery_packs.ini`.
 | **3. Create & install** | **4. Done** |
 | ![Create](docs/img/3_create.png) | ![Done](docs/img/4_done.png) |
 
-## Why?
+---
 
-X-Plane's default mesh, XPME's base packages and the stock AutoOrtho packs are all built
-from Viewfinder Panoramas / SRTM elevation data — 30 m in the Alps, 90 m in most other
-places, with radar artefacts in steep terrain. Sonny's models are compiled from official
-airborne-laser-scan (LiDAR) surveys and are far more accurate, especially on sharp ridges,
-in narrow valleys and in forests. For VFR flying through the mountains the difference is
-very visible.
+## The problem: X-Plane's mountains are soft and coarse
 
-## Two methods
+X-Plane draws the ground as a **mesh of triangles**. Every corner of a triangle (a *point* or
+*vertex*) has a height; between the points X-Plane draws flat triangle faces. How good the
+mountains look depends on two things:
 
-| | **Improve my current terrain** (default) | **Build a new, denser mesh** |
+1. **How accurate the heights are.** X-Plane's default scenery, XPME's base packages and the stock
+   AutoOrtho packs are built from 30–90 m satellite elevation data (SRTM, Viewfinder Panoramas
+   and similar radar-based models).
+   Radar data is blurred: knife-edge ridges come out rounded and too low, cliffs become slopes,
+   narrow gullies disappear, forests add a few metres.
+2. **Where the points are.** These meshes spread their points fairly **evenly**, roughly every
+   50–100 m — on the flat valley floor just as on a ridge. Whatever happens *between* two points
+   (a crest, the edge of a rock band) is lost, however good the data is.
+
+Laser scans (LiDAR) measure the bare ground to a few decimetres. This app brings that data into
+X-Plane in one of two ways.
+
+## The two options compared with XPME / default
+
+![Three meshes of the same mountain](docs/img/mesh_compare.png)
+
+![Cross-section through ridge and rock band](docs/img/mesh_profile.png)
+
+*A generic, made-up 3 × 3 km mountain slope (drawn by
+[`packaging/make_readme_figures.py`](packaging/make_readme_figures.py)). The point counts follow
+what was measured on a real tile: around Innsbruck XPME's mesh has 1.6 million triangles per
+1°×1° tile, the new mesh at "High" detail 3.6 million.*
+
+| | **XPME / X-Plane default** | **Improve my current terrain** | **Build a new, denser mesh** |
+|---|---|---|---|
+| Points of the mesh | evenly spread, ~50–100 m apart | **the same points** as XPME | **new points**, placed where the terrain bends: dense on ridges, cliffs and gullies, sparse on flat ground |
+| Heights | satellite radar, blurred | **LiDAR** at every point | **LiDAR** at every point |
+| Ridges, rock bands | rounded, cut off | correct where a point sits, still cut between points | sharp |
+| Photos | XPME / AutoOrtho | unchanged (XPME / AutoOrtho) | **XPME's** or AutoOrtho's photos, same tiling |
+| Water, coastline, roads | XPME / X-Plane | unchanged | rebuilt from OpenStreetMap |
+| Airports | flattened by XPME / X-Plane | unchanged (heights around runways are kept) | runways follow their real, smoothed profile (Courchevel stays steep); aprons are laid level |
+| Build time per 1°×1° tile | — | ~2 min | ~10–25 min |
+| Disk per tile | — | ~100 MB | ~50 MB (1″, High) |
+| Installed as | — | `z_dem_<region>` | `z_dem_mesh_<region>` |
+
+**Which one should I use?**
+
+* **Build a new, denser mesh** where you actually fly in the mountains — this is where LiDAR
+  shows its full detail. Pick *1″* resolution and *High* mesh detail; with your own 10 m data
+  (see below) *1/3″*.
+* **Improve my current terrain** for large areas around it: in minutes per tile you get correct
+  heights everywhere while keeping XPME's water, roads and airport flattening.
+* Both can be installed at the same time. Where a tile exists in both, the new mesh wins (it is
+  listed above in `scenery_packs.ini`; the app keeps that order).
+* Where only satellite data exists (red tiles on the map, e.g. Hungary, the Balkans) the heights
+  are no better than XPME's — a new mesh is still denser there, but the gain is small.
+
+## How it works
+
+### Improve my current terrain
+
+1. For every tile the app reads `Custom Scenery/scenery_packs.ini` and finds the mesh X-Plane
+   really uses — the highest-priority pack with terrain for that tile (overlays such as simHeaven
+   are skipped), usually `XPME_Europe`, or X-Plane's Global Scenery.
+2. It converts that tile (`.dsf`) to text with Laminar's **DSFTool**, replaces the height and
+   the surface normal (for correct hill shading) of every point with LiDAR values and updates the
+   XP12 elevation raster. Triangles, terrain types, water, roads and objects stay exactly as they
+   were.
+3. Heights are **not** changed on water, around runways (airport flattening by X-Plane or XPME is
+   kept) and towards tile edges whose neighbour is not processed — with smooth transitions.
+4. The terrain definitions (`.ter`) are copied with paths pointing back to XPME's textures, so
+   XPME keeps delivering the photos. The pack is listed **directly above** XPME in
+   `scenery_packs.ini`.
+
+### Build a new, denser mesh — what the app does with Ortho4XP
+
+[Ortho4XP](https://github.com/oscarpilote/Ortho4XP) is the well-known open-source tool that
+builds X-Plane photo scenery. Used on its own it needs a lot of manual work: getting elevation
+data, choosing dozens of settings, downloading tens of GB of photos, and wiring the result into
+X-Plane. The app ships Ortho4XP (unmodified, GPL v3) and runs it without its window:
+
+| Step | Ortho4XP on its own | What the app does |
 |---|---|---|
-| Works with | **XPME**, AutoOrtho, Ortho4XP packs, **default X-Plane scenery (no ortho)** | **XPME** or AutoOrtho (they deliver the photos) |
-| What it does | Takes the base mesh X-Plane currently uses for each tile and replaces the vertex heights and normals with LiDAR values | Ortho4XP builds a completely new mesh from the LiDAR data |
-| Textures, water, roads, forests | unchanged — still delivered by XPME / AutoOrtho / X-Plane | new Ortho4XP mesh (water/roads from OpenStreetMap), photos from XPME or AutoOrtho |
-| Detail | as dense as your current mesh, but with correct heights | densest (selectable mesh detail) |
-| Needs internet for | DEM download | DEM download + OpenStreetMap (Overpass) |
-| Time per 1°×1° tile | ~2 min | 2–6 min |
+| Elevation | SRTM / Viewfinder by default; LiDAR only if you find, download and convert it yourself | Downloads the best LiDAR / national model for the tile, fills gaps, reprojects it onto the tile grid and hands it to Ortho4XP as `custom_dem` |
+| Vector data | One Overpass (OpenStreetMap) server, often busy | Rotates through six Overpass servers, retries, caches the result, explains failures |
+| Mesh | Triangle4XP with your settings | Same Triangle4XP, with tested presets: *Balanced / High / Maximum* (`curvature_tol` 2.0 / 1.2 / 0.8, up to 3 / 4 / 5 M triangles) |
+| Airports | Runways and taxiways follow a fitted height profile, aprons follow the blurred terrain — on sloped airfields parked aircraft stand tilted | Same runway profiles, **aprons laid as planes with at most 1.5 % slope** |
+| Photos | Downloads and converts every photo (tens of GB per region) | **Downloads no photos at all**: the terrain files point straight at XPME's `textures/` folder (or at AutoOrtho's), which streams them while you fly. Same names, same tiling (Bing, zoom 16, zoom 18 around airports) |
+| Install | Copy folders, sort `scenery_packs.ini` by hand | Installs into Custom Scenery, lists the pack above XPME and above `z_dem_*` packs, keeps a backup of the ini |
 
-**Improve** is the right choice for almost everyone. How it works:
-
-1. For every tile the app reads `Custom Scenery/scenery_packs.ini` and finds the base mesh
-   X-Plane really uses — the highest-priority pack with a DSF for that tile (overlays such as
-   simHeaven are skipped), or the X-Plane 12 Global Scenery if no pack covers it.
-2. It converts that DSF to text with Laminar's DSFTool, writes LiDAR elevations and matching
-   vertex normals (for correct hill shading) and updates the XP12 elevation raster.
-   Triangulation, terrain types, water, roads, forests and objects are left exactly as they were.
-3. Terrain definitions of photo packs (XPME/AutoOrtho) are copied with their texture paths
-   pointing back to the original pack (`../../XPME_Europe/textures/…`), so XPME or AutoOrtho
-   keeps streaming the photos.
-4. Heights are **not** changed on water (lakes and sea stay flat), **around runways** (airport
-   flattening by X-Plane, XPME or Ortho4XP is preserved — runways come from `apt.dat`) and
-   towards tile edges whose neighbour is not processed (no steps at the seams). Transitions
-   are smooth.
-5. The result is installed as `Custom Scenery/z_dem_<region>` and listed in
-   `scenery_packs.ini` **directly above** the pack it improves.
-
-**New mesh with XPME's photos.** Improve keeps the points of the existing mesh, so fine
-(10 m / LiDAR) data shows only partly. For the full detail choose *Build a new, denser mesh*
-and, on the Create page, *Custom Scenery, photos from XPME*. Ortho4XP builds the mesh with the
-same photo tiling XPME uses (Bing, zoom 16, zoom 18 around airports); the terrain files point
-straight at `XPME_<region>/textures/…`, which XPME delivers on demand. The pack is installed as
-`Custom Scenery/z_dem_mesh_<region>` above XPME's packages. XPME must be running while you fly.
-Runways keep their real (smoothed) profile - Courchevel stays steep - while aprons are laid as
-gently sloped planes (max. 1.5 %), so parked aircraft stand level.
+Each tile is built in its own worker process (several at once on a strong PC), so one failing
+tile never stops the others; *Retry failed tiles* rebuilds just those.
 
 ## Quick start (Windows 10/11)
 
-1. Download **`XP12DEMGenerator-Setup.exe`** from the [latest release](../../releases/latest)
-   (or from the newest successful [build run](../../actions) → *Artifacts*) and run it. It installs
-   per user (no administrator rights), adds a Start-menu entry and an uninstaller. Windows
-   SmartScreen may warn because the installer is not code-signed: *More info → Run anyway*.
-   A portable ZIP (`XP12DEMGenerator-windows.zip`) is available as well.
-2. **XPME / AutoOrtho users:** start XPME or AutoOrtho first, so its scenery folders can be
-   read. The app warns you if a pack in `scenery_packs.ini` is empty (= not running).
-3. **Region** — pick a preset (Alps, Tyrol, Dolomites, Pyrenees, Norway, Budapest, Colorado,
-   Sierra Nevada, Cascades, Grand Canyon, Alaska, Hawaii…) or click
-   your own 1°×1° tiles on the map (OpenTopoMap / OpenStreetMap with borders, places and contour lines —
-   free, no API key; offline a built-in Natural Earth map with country borders is shown).
-   The map works like any web map: drag to move, mouse wheel or **+/−** to zoom, click a tile
-   to (de)select it, **Shift+drag** selects many tiles, right-drag removes them.
-   Tile colours show the data quality: **green** = LiDAR (best), **blue** = national model (good),
-   **red** = satellite only (basic); *Highlight data quality* makes them stand out.
-   **Orange** tiles are already installed (by any pack of this app, also next to XPME),
-   **dashed** tiles have their elevation data downloaded but are not built yet. The
-   background map is shown in grey so the colours are easy to tell apart. Below the map the app
-   counts how many selected tiles are installed and not built yet, and which data quality they get — *Select only missing tiles*
-   keeps just the ones you still need. If you build into a pack that already contains some
-   of the selected tiles, the app asks whether to build only the new tiles or replace them.
-4. **Method & resolution** — keep *Improve my current terrain*, choose 1″ (≈30 m) or 3″ (≈90 m).
-5. **Create** — the summary shows which terrain each tile currently uses; click
-   *Create & Install*.
-   The remaining time is estimated in seconds per tile; the app remembers how long tiles take
-   on your PC, so from the second build on the estimate matches your hardware.
-   **Delete data…** (bottom left) removes downloaded data, caches, settings and — only if you
-   tick it — the installed packs of this app. It asks twice; other scenery is never touched.
-6. If something fails (e.g. XPME was not running), fix the cause and click **Retry failed tiles** —
-   only the failed tiles are built again.
-7. Start X-Plane 12 (with XPME/AutoOrtho as usual) and fly. The new terrain is stored locally;
-   the app does not need to run while flying.
+1. **Download** `XP12DEMGenerator-Setup.exe` from the [latest release](../../releases/latest) (or
+   from the newest successful [build run](../../actions) → *Artifacts*) and run it. It installs per
+   user, without administrator rights. SmartScreen may warn because the installer is not
+   code-signed: *More info → Run anyway*.
+2. **Start XPME** (or AutoOrtho) and wait until it has finished loading. The app shows on step 3
+   whether XPME is running and asks you to start it if needed.
+3. **Step 1 – Region:** pick a preset (Alps, Tyrol, Dolomites, Pyrenees, Norway, Colorado, …) or
+   click your own 1°×1° tiles on the map. The map works like any web map: drag to move, mouse wheel
+   to zoom, click a tile to (de)select it, **Shift+drag** to select many, right-drag to remove,
+   **Esc** or *Deselect all* to clear.
+   * Tile colours show the elevation data: **green** = LiDAR (best), **blue** = national model
+     (good), **red** = satellite only (basic). *Highlight data quality* makes them stand out.
+   * **Orange ✓** tiles are already installed, **dashed** tiles have their data downloaded but are
+     not built. *Select only missing tiles* keeps the ones you still need.
+   * *Remove selected from X-Plane…* takes tiles out of this app's packs again — X-Plane then shows
+     XPME there as before.
+4. **Step 2 – Method & resolution:** choose the method (see above), 1″ (≈30 m), and for a new mesh
+   the detail (*High* recommended).
+5. **Step 3 – Create:** for a new mesh choose *Custom Scenery, photos from XPME*, then
+   *Create & Install*. The log shows every step; the remaining time is learned from your PC.
+6. **Fly.** The app does not need to run while flying — XPME does (it delivers the photos).
 
 ## Notes for XPME users
 
-* XPME's base packages are Ortho4XP-style meshes served through its own virtual drive. The
-  improved pack re-uses XPME's textures, so **XPME must stay installed and running**.
-* XPME keeps its packages outside X-Plane (absolute paths such as
-  `C:\Users\…\Documents\XPMapEnhancement\BasePack\XPME_Europe` in `scenery_packs.ini`) and
-  rewrites that block of the file when it starts. The improved pack therefore goes into
-  **Custom Scenery** and is listed **in front of** XPME's block; its `.ter` files reach XPME's
-  textures with relative paths (`../../../../Users/…/XPME_Europe/textures/…`). Only if XPME is on
-  another drive than X-Plane, the pack is placed next to XPME's packages instead.
-* Packs built by older versions inside XPME's folder are shown on step 1 as **"Needs a fix"**;
-  *Fix now* moves them into Custom Scenery (merging copies of the same name) and lists them
-  again. The next build of the same pack does this automatically.
-* After XPME updates its base packages, or after you flatten an airport in XPME, build the
-  region again (the pack's `xp12dem_pack.json` records which source each tile came from).
-
-## What gets installed where
-
-* **Improve:** `X-Plane 12/Custom Scenery/z_dem_<region>` with `Earth nav data/*.dsf` and, for
-  photo packs, small copies of the `.ter` files. Nothing of the original scenery is modified.
-* **New mesh:** `z_ao_dem_<region>` with terrain only (`Earth nav data`, `terrain/*.ter`, water
-  masks). The photo textures it references (`textures/<row>_<col>_BI16.dds`, ZL16 with ZL18
-  around airports) are exactly the names AutoOrtho generates on the fly. In AutoOrtho mode the
-  pack goes to `<AutoOrtho scenery path>/z_autoortho/scenery/`, AutoOrtho mounts it on start-up.
-* `scenery_packs.ini` is updated so the new pack wins over the mesh it replaces. A backup is
-  written to `scenery_packs.ini.xp12dem.bak`.
-* Building the same pack name again adds new tiles and replaces rebuilt ones.
-* Work files (DEM cache, OSM cache, logs) live in `%LOCALAPPDATA%\XP12DEMGenerator`.
-  Delete that folder to reclaim disk space; set the `XP12DEM_DATA` environment variable
-  to move it.
+* **XPME must run** when you build an *Improve* pack (its terrain files only exist while it runs)
+  and whenever you fly (it delivers the photos for both kinds of pack).
+* XPME keeps its packages in `Documents\XPMapEnhancement\BasePack` and rewrites their block at the
+  end of `scenery_packs.ini` when it starts. The app's packs therefore live in **Custom Scenery**,
+  are listed **in front of** that block and reach XPME's textures with relative paths.
+* If a pack ends up below XPME or below another pack (e.g. after XPME re-sorted the file), step 1
+  shows it as **Needs a fix** — *Fix now* puts it back in place.
+* After XPME updates its base packages, or after you flatten an airport in XPME, rebuild your
+  *Improve* tiles. New-mesh tiles only use XPME's photos and need no rebuild.
 
 ## Options explained
 
 | Option | Values | Notes |
 |---|---|---|
-| Method | **Improve** · **New mesh** | See above. |
-| DEM resolution | **1″** (≈30 m) · **1/3″** (≈10 m) · **3″** (≈90 m) | 1/3″ where 1–10 m data exists, otherwise 1″; 3″ is resampled from 1″ (3×3 mean). |
-| Mesh detail (new mesh only) | **Balanced** · **High** · **Maximum** | Ortho4XP `curvature_tol` 2.0 / 1.2 / 0.8 and `limit_tris` 3 / 4 / 5 M triangles per tile. |
-| Tiles at the same time | Automatic / 1 – 8 | *Automatic* picks the best value from CPU threads and RAM (about 2 GB per tile for *improve*, 3 GB for *new mesh*, 4 GB kept free). |
-| Own elevation files | optional | Folder with your own GeoTIFFs (any projection), `.hgt`, Sonny `.zip` or FABDEM files. Used first; missing tiles are downloaded automatically. |
+| Method | **Improve** · **New mesh** | See the comparison above. |
+| DEM resolution | **1″** (≈30 m) · **1/3″** (≈10 m) · **3″** (≈90 m) | 1/3″ only pays off where 1–10 m data covers the tile (USA, NZ, Japan, parts of Canada, or your own files); elsewhere it falls back to 1″. 3″ is resampled from 1″. |
+| Mesh detail (new mesh) | **Balanced** · **High** · **Maximum** | More triangles in steep terrain. *High* ≈ 2× XPME's triangles, *Maximum* another 30–50 %. |
+| Where to install (new mesh) | **Photos from XPME** · AutoOrtho's folder · Custom Scenery with AutoOrtho photos | XPME is preselected when it is found in `scenery_packs.ini`. |
+| Tiles at the same time | Automatic / 1 – 8 | *Automatic* picks the best value from CPU threads and RAM. |
+| Own elevation files | optional folder | Your own GeoTIFFs (any projection), `.hgt`, Sonny `.zip` (also the 0.5″ / 10 m models of Austria and Switzerland, zips work as they are), FABDEM. Used first; missing tiles are downloaded. |
+
+## What gets installed where
+
+* **Improve:** `X-Plane 12/Custom Scenery/z_dem_<region>` — new `Earth nav data/*.dsf` plus small
+  copies of XPME's `.ter` files. Nothing of XPME or X-Plane is modified.
+* **New mesh with XPME photos:** `Custom Scenery/z_dem_mesh_<region>` — `Earth nav data`,
+  `terrain/*.ter` (pointing at XPME's textures) and small water-mask PNGs.
+* **New mesh for AutoOrtho:** `z_ao_dem_<region>` in AutoOrtho's scenery folder or Custom Scenery.
+* `scenery_packs.ini` is updated so the new pack wins; a backup is written to
+  `scenery_packs.ini.xp12dem.bak`. Building the same pack name again adds and replaces tiles.
+* Downloads, caches and logs live in `%LOCALAPPDATA%\XP12DEMGenerator` (*Delete data…* at the
+  bottom left clears them; set `XP12DEM_DATA` to move the folder).
 
 ## Elevation data sources
 
@@ -181,16 +207,32 @@ step is visible. The map colours show the result before you build (hover a tile 
 
 ## Command line
 
-The same pipeline is available without the GUI:
+The same pipeline is available without the window:
 
 ```
-XP12DEMGenerator.exe build --region tyrol --resolution 1                  # improve current terrain
-XP12DEMGenerator.exe build --tiles +46+007,+46+008 --name "Valais" --parallel 2
-XP12DEMGenerator.exe build --region alps --method rebuild --mesh high      # new mesh for AutoOrtho
+XP12DEMGenerator.exe build --region tyrol                                   # improve current terrain
+XP12DEMGenerator.exe build --region tyrol --method rebuild --target xpme --mesh high   # new mesh, XPME photos
+XP12DEMGenerator.exe build --tiles +45+006 --name "Courchevel" --method rebuild --target xpme
 ```
 
-Run `XP12DEMGenerator.exe build --help` for all options (`--method`, `--xplane`, `--target`,
-`--dem-folder`, `--no-install`).
+Run `XP12DEMGenerator.exe build --help` for all options (`--resolution`, `--xplane`,
+`--dem-folder`, `--parallel`, `--no-install`).
+
+## Troubleshooting
+
+* **"XPME is not running (or still loading)"** — start XPME, wait until it has finished loading,
+  click *Check again* / build again. Nothing was installed in the meantime.
+* **Old terrain still visible** — on step 1 look for *Needs a fix* and click *Fix now*. Or check
+  that `z_dem_mesh_…` / `z_dem_…` are listed above `XPME_…` in `Custom Scenery\scenery_packs.ini`
+  (and `z_dem_mesh_…` above `z_dem_…`).
+* **Building takes long at "Downloading OpenStreetMap data"** (new mesh) — the public Overpass
+  servers are often busy; the log shows each query and server. The app gives up after 10 minutes
+  per query with a clear message; finished downloads are cached, so a retry is faster.
+* **White or missing ground textures** — XPME (or AutoOrtho) is not running.
+* **Graphics memory (VRAM) full / crashes** — mostly the photo textures: lower the texture
+  quality one step, avoid high MSAA, and don't change graphics settings or resize windows during a
+  flight. `Log.txt` lines *"Target scale moved to 0.5 / 0.25"* mean VRAM is full.
+* Detailed per-tile logs: `%LOCALAPPDATA%\XP12DEMGenerator\logs`.
 
 ## Building from source
 
@@ -207,7 +249,7 @@ iscc /DMyAppVersion=0.1.0 packaging/installer.iss  # -> dist/XP12DEMGenerator-Se
 The app also runs on Linux (Ortho4XP's Linux binaries are included). Every push builds
 and smoke-tests the Windows executable with GitHub Actions; tags `v*` publish a release.
 
-### How it works
+### Code layout
 
 ```
 xp12dem/
@@ -221,6 +263,8 @@ xp12dem/
   inventory.py    installed packs and downloaded DEM tiles shown on the map
   cleanup.py      "Delete data" (caches, downloads, installed packs)
   reheight.py     "improve" mode: find the active mesh, apply LiDAR heights via DSFTool
+  aprons.py       new mesh: level aprons on sloped airfields
+  overpass.py     OpenStreetMap download with server rotation
   o4x_worker.py   worker process (one per tile): re-height job or headless Ortho4XP
   installer.py    pack assembly, AutoOrtho / Custom Scenery install, scenery_packs.ini
   xplane.py       X-Plane 12 and AutoOrtho detection
@@ -228,25 +272,11 @@ third_party/Ortho4XP   unmodified Ortho4XP sources + Triangle4XP / DSFTool / 7-Z
 ```
 
 `xp12dem-worker.exe` is an internal helper that the app starts itself — never run it manually.
-Each tile is processed by a separate `xp12dem-worker` process, which keeps the window responsive,
-lets several tiles run in parallel and isolates memory use and crashes of the heavy mesh tools. In *new mesh* mode it configures Ortho4XP
-(Sonny DEM as `custom_dem`, imagery download disabled, XP12 water, masks as separate
-PNGs for AutoOrtho), then runs Ortho4XP's normal steps: vector data → Triangle4XP
-mesh → masks → DSF.
-
-## Troubleshooting
-
-* **"Not readable: XPME_…"** — the pack's folder is empty because XPME (or AutoOrtho) is not
-  running. Start it and build again; otherwise the new heights stay hidden below that pack.
-* **"AutoOrtho (not found)"** (new mesh mode) — start AutoOrtho once and set its X-Plane /
-  scenery paths; the app reads them from `%USERPROFILE%\.autoortho`.
-* **Tiles show no photos** — AutoOrtho is not running or was not restarted after the install.
-* **Old terrain still visible** — check that `z_dem_…` / `z_ao_dem_…` is listed above the
-  pack it replaces (`XPME_…`, `z_ao_eur`, …) in `Custom Scenery\scenery_packs.ini`.
-* **OSM download is slow / fails** (new mesh mode only) — the public Overpass servers are sometimes busy; the
-  app rotates through six servers and gives up after 10 minutes per query with a clear
-  message. Just run the build again later — finished downloads are cached.
-* Detailed per-tile logs: `%LOCALAPPDATA%\XP12DEMGenerator\logs`.
+Each tile is processed by a separate `xp12dem-worker` process, which keeps the window
+responsive, lets several tiles run in parallel and isolates memory use and crashes of the heavy
+mesh tools. In *new mesh* mode it configures Ortho4XP (downloaded DEM as `custom_dem`, photo
+download disabled, XP12 water, water masks as separate PNGs) and runs Ortho4XP's normal steps:
+vector data → Triangle4XP mesh → masks → DSF.
 
 ## Credits and licenses
 
