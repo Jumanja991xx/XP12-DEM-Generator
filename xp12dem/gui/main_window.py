@@ -38,6 +38,11 @@ METHODS = (
      "every ridge and gully of the fine data. The photos come from XPME or AutoOrtho."),
 )
 CUSTOM_KEY = "__custom__"
+# Official photos: zoom level, label, GB per 1x1 degree tile (DDS incl. mipmaps, mid latitudes)
+PHOTO_ZOOMS = ((16, "Zoom 16 · 1.6 m per pixel · ~2.5 GB per tile"),
+               (17, "Zoom 17 · 0.8 m per pixel · ~9 GB per tile (recommended)"),
+               (18, "Zoom 18 · 0.4 m per pixel · ~36 GB per tile"))
+_PHOTO_GB = {16: 2.5, 17: 9.0, 18: 36.0}
 
 # Rough per-tile build time in minutes on a mid-range CPU, used for estimates.
 _MINUTES = {("1", "balanced"): 3, ("1", "high"): 4, ("1", "maximum"): 6,
@@ -816,13 +821,29 @@ class MainWindow(QMainWindow):
         xp_row.addWidget(change)
         target_layout.addLayout(xp_row)
         self.target_group = QButtonGroup(self)
+        self.target_official = QRadioButton(
+            "Custom Scenery, official aerial photos (Bavaria · Tyrol · Austria · Switzerland), "
+            "downloaded once and stored")
         self.target_xpme = QRadioButton()
         self.target_ao = QRadioButton()
         self.target_cs = QRadioButton("Custom Scenery, photos from AutoOrtho (AutoOrtho must run)")
-        for button in (self.target_xpme, self.target_ao, self.target_cs):
+        for button in (self.target_official, self.target_xpme, self.target_ao, self.target_cs):
             self.target_group.addButton(button)
             button.toggled.connect(lambda *_: self._refresh_summary())
             target_layout.addWidget(button)
+            if button is self.target_official:
+                zl_row = QHBoxLayout()
+                zl_row.addSpacing(26)
+                self.photo_zl_label = QLabel("Photo detail")
+                zl_row.addWidget(self.photo_zl_label)
+                self.photo_zl_combo = QComboBox()
+                for zl, text in PHOTO_ZOOMS:
+                    self.photo_zl_combo.addItem(text, zl)
+                self.photo_zl_combo.setCurrentIndex(1)
+                self.photo_zl_combo.currentIndexChanged.connect(lambda *_: self._refresh_summary())
+                zl_row.addWidget(self.photo_zl_combo)
+                zl_row.addStretch(1)
+                target_layout.addLayout(zl_row)
         self.target_hint = _hint("")
         self.target_hint.setTextFormat(Qt.RichText)
         self.target_hint.setMinimumHeight(56)
@@ -900,6 +921,8 @@ class MainWindow(QMainWindow):
             return InstallTarget.for_custom_scenery(self.xplane)
         if self.target_xpme.isChecked():
             return InstallTarget.for_custom_scenery(self.xplane) if self._xpme_packs() else None
+        if self.target_official.isChecked():
+            return InstallTarget.for_custom_scenery(self.xplane)
         if self.target_ao.isChecked():
             ao = read_autoortho_config()
             if ao and ao.ao_scenery_dir:
@@ -908,7 +931,26 @@ class MainWindow(QMainWindow):
         return InstallTarget.for_custom_scenery(self.xplane)
 
     def _photos(self) -> str:
-        return "xpme" if self._method_key() == "rebuild" and self.target_xpme.isChecked() else "autoortho"
+        if self._method_key() != "rebuild":
+            return "autoortho"
+        if self.target_official.isChecked():
+            return "official"
+        return "xpme" if self.target_xpme.isChecked() else "autoortho"
+
+    def _photo_zl(self) -> int:
+        return int(self.photo_zl_combo.currentData() or 17) if hasattr(self, "photo_zl_combo") else 17
+
+    @staticmethod
+    def _official_share(tiles) -> float:
+        """Share of the selected tiles that the official photo services cover (roughly)."""
+        from ..imagery import official_layers
+
+        if not tiles:
+            return 0.0
+        boxes = [layer.bounds for layer in official_layers()]
+        inside = sum(1 for lat, lon in tiles if any(
+            lon + 1 > b[0] and lon < b[2] and lat + 1 > b[1] and lat < b[3] for b in boxes))
+        return inside / len(tiles)
 
     def _xpme_packs(self) -> list[str]:
         """XPME packages listed in scenery_packs.ini (they provide the photos)."""
@@ -959,6 +1001,8 @@ class MainWindow(QMainWindow):
         download_mb = _DOWNLOAD_MB.get(res.key, 25) * len(tiles)
         per_tile = _IMPROVE_MB if method == "improve" else _PACK_MB[(res.key, detail.key)]
         disk_mb = per_tile * len(tiles)
+        if self._photos() == "official":
+            disk_mb += int(_PHOTO_GB[self._photo_zl()] * 1024 * len(tiles))
         mesh_text = ("Mesh: your current terrain, LiDAR heights" if method == "improve"
                      else f"Mesh: new Ortho4XP mesh ({detail.label})")
         self.summary_label.setText(
@@ -977,6 +1021,10 @@ class MainWindow(QMainWindow):
         self.target_ao.setVisible(not improve)
         self.target_cs.setVisible(not improve)
         self.target_xpme.setVisible(not improve)
+        self.target_official.setVisible(not improve)
+        for widget in (self.photo_zl_label, self.photo_zl_combo):
+            widget.setVisible(not improve)
+            widget.setEnabled(self.target_official.isChecked())
         if improve:
             self.target_hint.setText(self._sources_preview(tiles) + self._xpme_line(tiles))
             target_ok = self._target() is not None
@@ -1000,7 +1048,19 @@ class MainWindow(QMainWindow):
         if not self.target_group.checkedButton() or not self.target_group.checkedButton().isEnabled():
             (self.target_xpme if xpme else self.target_ao if self.target_ao.isEnabled()
              else self.target_cs).setChecked(True)
-        if self.target_xpme.isChecked():
+        if self.target_official.isChecked():
+            share = self._official_share(tiles)
+            warn = ("" if share >= 0.999 or not tiles else
+                    f"<br><b style='color:#ff8a65'>Only {share:.0%} of the selected tiles lie in Bavaria, "
+                    "Austria or Switzerland</b> - elsewhere there are no official photos (XPME fills "
+                    "them if it is installed).")
+            self.target_hint.setText(
+                "A new mesh from the LiDAR data with the <b>official aerial photos</b> of Bavaria "
+                "(40 cm), Tyrol (20 cm), Austria and Switzerland, colour-matched across the borders. "
+                "The photos are downloaded once and stored in the pack (fast loading, no streaming, "
+                "XPME not needed in these tiles). Disk space and build time grow with the photo "
+                "detail." + warn)
+        elif self.target_xpme.isChecked():
             self.target_hint.setText(
                 "A new mesh from the LiDAR data, with XPME's photos on it. The pack goes into "
                 "Custom Scenery above XPME's packages, which stay installed: <b>XPME must be "
@@ -1157,6 +1217,7 @@ class MainWindow(QMainWindow):
             target=target,
             local_dem_source=Path(self.dem_folder_edit.text()) if self.dem_folder_edit.text().strip() else None,
             parallel=self._parallel(), method=self._method_key(), photos=self._photos(),
+            photo_zl=self._photo_zl(),
             extra_roots=self._extra_roots())
         if not retry:
             self._refresh_inventory()
@@ -1344,6 +1405,11 @@ class MainWindow(QMainWindow):
                      "click <b>Fix now</b>.</li>"
                      "<li>Rebuild this pack after XPME / AutoOrtho update their base packages "
                      "or after flattening an airport in XPME.</li>")
+        elif self._photos() == "official":
+            steps = ("<li>The photos are stored in the pack - nothing has to run while you fly. "
+                     "These tiles no longer use XPME (X-Plane loads only the topmost terrain).</li>"
+                     "<li>Photos: Bayerische Vermessungsverwaltung, Land Tirol, basemap.at, swisstopo "
+                     "(CC BY 4.0) - see the pack's README.txt.</li>")
         elif self._photos() == "xpme":
             steps = ("<li>Keep XPME installed and <b>running</b> while you fly - it delivers the "
                      "photos for the new mesh.</li>"
@@ -1407,7 +1473,9 @@ class MainWindow(QMainWindow):
         index = self.parallel_combo.findData(max(0, min(8, s.parallel)))
         self.parallel_combo.setCurrentIndex(max(0, index))
         self.dem_folder_edit.setText(s.local_dem_folder)
-        {"custom_scenery": self.target_cs, "xpme": self.target_xpme}.get(
+        index = self.photo_zl_combo.findData(s.photo_zl)
+        self.photo_zl_combo.setCurrentIndex(index if index >= 0 else 1)
+        {"custom_scenery": self.target_cs, "xpme": self.target_xpme, "official": self.target_official}.get(
             s.install_target, self.target_ao).setChecked(True)
         for card in self.method_cards:
             card.radio.setChecked(card.key == s.method)
@@ -1423,7 +1491,9 @@ class MainWindow(QMainWindow):
         s.mesh_detail = self._mesh_key()
         s.parallel = int(self.parallel_combo.currentData() or 0)
         s.local_dem_folder = self.dem_folder_edit.text().strip()
-        s.install_target = ("xpme" if self.target_xpme.isChecked() else
+        s.photo_zl = self._photo_zl()
+        s.install_target = ("official" if self.target_official.isChecked() else
+                            "xpme" if self.target_xpme.isChecked() else
                             "autoortho" if self.target_ao.isChecked() else "custom_scenery")
         s.method = self._method_key()
         current = self.region_list.currentItem()

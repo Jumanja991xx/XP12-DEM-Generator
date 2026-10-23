@@ -21,7 +21,7 @@ from typing import Optional
 from . import paths
 from .dem import Cancelled, DemStore, resolution
 from .eta import DEFAULT_BUILD, Estimator, TimingHistory, build_key
-from .installer import IMPROVE_PREFIX, MESH_PREFIX, InstallTarget, assemble_pack, install_pack, pack_name
+from .installer import IMPROVE_PREFIX, MESH_PREFIX, ORTHO_PREFIX, InstallTarget, assemble_pack, install_pack, pack_name
 from .o4x_worker import PROGRESS_PREFIX
 from .regions import Tile, tile_name
 
@@ -75,7 +75,8 @@ class BuildRequest:
     install: bool = True
     keep_work_files: bool = False
     method: str = "improve"  # "improve" existing terrain, or "rebuild" with Ortho4XP
-    photos: str = "autoortho"  # new mesh: photos streamed by "autoortho", or XPME's ("xpme")
+    photos: str = "autoortho"  # new mesh: "autoortho" / "xpme" (streamed) or "official" (stored)
+    photo_zl: int = 17  # "official" photos: zoom level (zoom 18 around airports)
     extra_roots: list[Path] = field(default_factory=list)  # e.g. AutoOrtho's real scenery dir
 
     @property
@@ -161,6 +162,8 @@ class Pipeline:
         self.dem_sources: dict[Tile, str] = {}  # tile -> elevation source used
         self.highlights: dict[Tile, list] = {}  # tile -> where the height changed most
         self._install_dir: Optional[Path] = None
+        self._fill_packs: dict = {}
+        self.photo_credits: set[str] = set()
         self.eta: Optional[Estimator] = None
         self._history = TimingHistory(paths.data_root() / "timings.json")
         self._build_key = build_key(request.method, request.resolution_key, request.mesh_key)
@@ -263,6 +266,13 @@ class Pipeline:
                 todo = [t for t in todo if t in photo_packs]
                 target = InstallTarget.for_custom_scenery(req.xplane)
                 self._install_dir = target.pack_dir(req.pack)
+            elif req.photos == "official":
+                target = InstallTarget.for_custom_scenery(req.xplane)
+                self._install_dir = target.pack_dir(req.pack)
+                from . import reheight as RH
+
+                # XPME's photos fill places without official ones (other states / countries)
+                self._fill_packs = {t: p for t in todo if (p := RH.find_photo_pack(t, req.xplane))}
             self.events.stage("Building terrain meshes with Ortho4XP")
         selected = set(tiles)
         workers = max(1, min(req.parallel, len(todo) or 1))
@@ -314,20 +324,28 @@ class Pipeline:
                       sources=({t: sources[t].label for t in tile_dirs} if improve else
                                {t: photo_packs[t][0] for t in tile_dirs} if photo_packs else None),
                       dem_sources={t: self.dem_sources.get(t, "") for t in tile_dirs},
-                      method=req.method)
+                      method=req.method, with_photos=req.photos == "official",
+                      photo_credits=self.photo_credits)
         if req.install:
             self.events.stage("Installing into X-Plane 12")
             above = {src.name for t, src in sources.items() if t in tile_dirs and src.kind == "pack"}
             above |= {photo_packs[t][0] for t in tile_dirs if t in photo_packs}
-            if improve or photo_packs:
+            above |= {self._fill_packs[t][0] for t in tile_dirs if t in self._fill_packs}
+            if improve or photo_packs or req.photos == "official":
                 # a fresh build must also win over older LiDAR packs for the same tiles
                 from .reheight import enabled_packs
 
                 # a fresh build must also win over older LiDAR packs for the same tiles -
                 # but a new mesh (z_dem_mesh_*) always stays above re-heighted terrain
+                # newer and better kinds stay on top: official photos > XPME mesh > improve
+                rank = {ORTHO_PREFIX: 3, MESH_PREFIX: 2}
+                mine = 1 if improve else rank[ORTHO_PREFIX if req.photos == "official" else MESH_PREFIX]
+
+                def kind(p: str) -> int:
+                    return next((r for pre, r in rank.items() if p.lower().startswith(pre)), 1)
+
                 above |= {p for p in enabled_packs(req.xplane / "Custom Scenery")
-                          if p.lower().startswith(IMPROVE_PREFIX) and p != req.pack
-                          and (not improve or not p.lower().startswith(MESH_PREFIX))}
+                          if p.lower().startswith(IMPROVE_PREFIX) and p != req.pack and kind(p) <= mine}
             if improve:
                 self._move_old_copies(target, req.pack)
             result.installed_to = install_pack(staged, target, req.pack, above)
@@ -375,16 +393,23 @@ class Pipeline:
             "global_scenery": str(global_scenery) if global_scenery.is_dir() else "",
             "curvature_tol": detail.curvature_tol,
             "limit_tris": detail.limit_tris,
-            "provider": "BI",
-            "zl": 16,
+            "provider": "OF" if self.req.photos == "official" else "BI",
+            "zl": self.req.photo_zl if self.req.photos == "official" else 16,
             "cover_airports": "True",
-            "cover_zl": 18,
+            "cover_zl": max(18, self.req.photo_zl) if self.req.photos == "official" else 18,
             "water_tech": "XP12",
         }
         if not job["global_scenery"]:
             self.events.log(f"{name}: X-Plane 12 Global Scenery not found - "
                             "DSF will be built without XP12 bathymetry rasters.")
         self.events.log(f"{name}: starting Ortho4XP")
+        build = self._run_mesh_worker(tile, job, build_dir)
+        if self.req.photos == "official":
+            self._make_photos(tile, build)
+        return build
+
+    def _run_mesh_worker(self, tile: Tile, job: dict, build_dir: Path) -> Path:
+        name = tile_name(*tile)
         try:
             return self._run_worker(tile, job, build_dir)
         except Cancelled:
@@ -435,6 +460,37 @@ class Pipeline:
         count = sum(len(v) for v in runways.values())
         self.events.log(f"{count} runway(s) found - their surroundings keep the original heights")
         return sources, runways
+
+    def _make_photos(self, tile: Tile, build_dir: Path) -> None:
+        """Download the official aerial photos for the new mesh and store them as DDS."""
+        from . import imagery
+
+        name = tile_name(*tile)
+        textures = imagery.textures_of(build_dir / "terrain")
+        fill = self._fill_packs.get(tile)
+        layers = imagery.official_layers(fill[1] / "textures" if fill else None)
+        zls = sorted({t.zl for t in textures})
+        self.events.log(f"{name}: [photos] {len(textures)} textures (zoom {', '.join(map(str, zls))}) "
+                        "from official aerial photos" + (f", gaps from {fill[0]}" if fill else ""))
+        fetcher = imagery.Fetcher(paths.data_root() / "photos", cancel=self.cancel_event.is_set)
+        try:
+            stats = imagery.build_textures(textures, build_dir / "textures", layers, fetcher,
+                                           log=lambda text: self.events.log(f"{name}:   {text}"))
+        except RuntimeError:
+            if self.cancel_event.is_set():
+                raise Cancelled()
+            raise
+        finally:
+            fetcher.close()
+        used = ", ".join(f"{k} {v}" for k, v in stats["sources"].items() if v)
+        self.events.log(f"{name}:   photos done: {stats['written']} new, {stats['skipped']} kept ({used})")
+        if stats["missing_share"] > 0.01:
+            self.events.log(f"{name}: warning - {stats['missing_share']:.0%} of the area has no official "
+                            "photo (outside Bavaria / Austria / Switzerland)"
+                            + ("" if fill else " and was filled with an average colour - start XPME to "
+                               "fill it with XPME's photos"))
+        with self._lock:
+            self.photo_credits |= set(imagery.credits(stats, layers))
 
     def _photo_packs(self, tiles: list[Tile], result: BuildResult) -> dict:
         """The XPME package whose photos each tile's new mesh will use."""

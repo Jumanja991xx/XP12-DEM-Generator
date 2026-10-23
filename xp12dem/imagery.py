@@ -523,44 +523,63 @@ def official_layers(xpme_textures: Optional[Path] = None) -> list[Layer]:
 
 def build_textures(textures: Iterable[TextureId], out_dir: Path, layers: list[Layer],
                    fetcher: Fetcher, log: Callable[[str], None] = print,
-                   progress: Callable[[int, int], None] = lambda done, total: None) -> dict:
-    """Write one DDS per texture block; returns statistics."""
+                   progress: Callable[[int, int], None] = lambda done, total: None,
+                   parallel: int = 4) -> dict:
+    """Write one DDS per texture block (several at once); returns statistics."""
     textures = list(textures)
     out_dir = Path(out_dir)
     stats = {"textures": len(textures), "written": 0, "skipped": 0, "missing_share": 0.0,
              "sources": {layer.key: 0 for layer in layers}}
+    lock = threading.Lock()
+    done = [0]
     started = time.monotonic()
-    for i, tex in enumerate(textures, 1):
+
+    def one(tex: TextureId) -> None:
         target = out_dir / tex.name
         if target.is_file() and target.stat().st_size > 1000:
-            stats["skipped"] += 1
-            progress(i, len(textures))
-            continue
-        parts = []
-        coverage = np.zeros((TEX_PX, TEX_PX), bool)
-        for layer in layers:
-            if not layer.covers(tex):
-                continue
-            rgba = layer.fetch(tex, fetcher)
-            if rgba is None:
-                continue
-            rgba = layer.restrict(tex, rgba)
-            if not rgba[..., 3].any():
-                continue
-            parts.append((layer, rgba))
-            stats["sources"][layer.key] += 1
-            coverage |= rgba[..., 3] > 0
-            if coverage.all():
-                break
-        rgb, missing = composite(parts)
-        stats["missing_share"] += missing
-        write_dds(rgb, target)
-        stats["written"] += 1
-        progress(i, len(textures))
-        if i % 25 == 0 or i == len(textures):
-            rate = i / max(time.monotonic() - started, 1e-6)
-            log(f"photos: {i} of {len(textures)} textures ({rate * 60:.0f}/min, "
+            with lock:
+                stats["skipped"] += 1
+        else:
+            parts = []
+            coverage = np.zeros((TEX_PX, TEX_PX), bool)
+            used = []
+            for layer in layers:
+                if not layer.covers(tex):
+                    continue
+                rgba = layer.fetch(tex, fetcher)
+                if rgba is None:
+                    continue
+                rgba = layer.restrict(tex, rgba)
+                if not rgba[..., 3].any():
+                    continue
+                parts.append((layer, rgba))
+                used.append(layer.key)
+                coverage |= rgba[..., 3] > 0
+                if coverage.all():
+                    break
+            rgb, missing = composite(parts)
+            write_dds(rgb, target)
+            with lock:
+                stats["written"] += 1
+                stats["missing_share"] += missing
+                for key in used:
+                    stats["sources"][key] += 1
+        with lock:
+            done[0] += 1
+            n = done[0]
+        progress(n, len(textures))
+        if n % 25 == 0 or n == len(textures):
+            rate = n / max(time.monotonic() - started, 1e-6)
+            log(f"photos: {n} of {len(textures)} textures ({rate * 60:.0f}/min, "
                 f"{fetcher.bytes / 1e6:.0f} MB downloaded)")
-    if textures:
-        stats["missing_share"] /= len(textures)
+
+    with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
+        for future in [pool.submit(one, tex) for tex in textures]:
+            future.result()  # re-raise errors (e.g. cancelled)
+    if stats["written"]:
+        stats["missing_share"] /= stats["written"]
     return stats
+
+
+def credits(stats: dict, layers: list[Layer]) -> list[str]:
+    return [layer.credit for layer in layers if stats["sources"].get(layer.key)]

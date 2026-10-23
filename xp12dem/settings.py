@@ -12,7 +12,8 @@ from .paths import settings_file
 class Settings:
     xplane_path: str = ""
     method: str = "improve"  # or "rebuild"
-    install_target: str = "autoortho"  # new mesh: "xpme" photos, "autoortho" folder or "custom_scenery"
+    install_target: str = "autoortho"  # new mesh: "official"/"xpme" photos, "autoortho" folder or "custom_scenery"
+    photo_zl: int = 17  # official photos: zoom level
     resolution: str = "1"
     mesh_detail: str = "high"
     parallel: int = 0  # 0 = automatic (recommended for this PC)

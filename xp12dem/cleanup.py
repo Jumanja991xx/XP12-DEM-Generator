@@ -53,6 +53,7 @@ def local_items() -> list[DataItem]:
         DataItem("dem", "Downloaded elevation data (DEM tiles)", [paths.dem_cache_dir()], True),
         DataItem("work", "Temporary build files, OpenStreetMap cache and logs",
                  [paths.work_dir(), paths.log_dir()], True),
+        DataItem("photos", "Downloaded aerial photos (official open data)", [root / "photos"], True),
         DataItem("maps", "Cached background map", [root / "maptiles"], True),
         DataItem("settings", "Settings and remembered build times",
                  [paths.settings_file(), root / "timings.json"], False),

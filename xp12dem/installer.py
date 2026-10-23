@@ -17,6 +17,7 @@ from .xplane import AutoOrthoConfig
 PACK_PREFIX = "z_ao_dem_"  # new Ortho4XP mesh, lives in AutoOrtho's scenery folder
 IMPROVE_PREFIX = "z_dem_"  # re-heighted copy of the mesh the user already has
 MESH_PREFIX = "z_dem_mesh_"  # new Ortho4XP mesh using XPME's photos, lives in Custom Scenery
+ORTHO_PREFIX = "z_dem_ortho_"  # new mesh with official aerial photos stored in the pack
 MANIFEST = "xp12dem_pack.json"
 INI_NAME = "scenery_packs.ini"
 INI_BACKUP_SUFFIX = ".xp12dem.bak"
@@ -28,6 +29,8 @@ _MESH_PACK_PREFIXES = ("z_ao_", "z_autoortho", "zortho4xp_", "z_ortho", "zzz")
 def pack_name(slug: str, method: str = "rebuild", photos: str = "autoortho") -> str:
     if method == "improve":
         return IMPROVE_PREFIX + slug
+    if photos == "official":
+        return ORTHO_PREFIX + slug
     return (MESH_PREFIX if photos == "xpme" else PACK_PREFIX) + slug
 
 
@@ -71,7 +74,8 @@ def assemble_pack(tile_dirs: dict[Tile, Path], pack_dir: Path, *, region_name: s
                   resolution_label: str, mesh_label: str,
                   sources: Optional[dict[Tile, str]] = None,
                   dem_sources: Optional[dict[Tile, str]] = None,
-                  method: Optional[str] = None) -> list[Tile]:
+                  method: Optional[str] = None, with_photos: bool = False,
+                  photo_credits: Iterable[str] = ()) -> list[Tile]:
     """Merge Ortho4XP tile build folders into one scenery pack folder.
 
     Only what X-Plane needs is copied: the DSF, the .ter terrain definitions
@@ -94,13 +98,14 @@ def assemble_pack(tile_dirs: dict[Tile, Path], pack_dir: Path, *, region_name: s
             dst = pack_dir / sub
             dst.mkdir(parents=True, exist_ok=True)
             for item in src.iterdir():
-                if item.is_file() and item.suffix.lower() != ".dds":
+                if item.is_file() and (with_photos or item.suffix.lower() != ".dds"):
                     shutil.copy2(item, dst / item.name)
         added.append((lat, lon))
     if sources is None:
         (pack_dir / "textures").mkdir(parents=True, exist_ok=True)
     _write_manifest(pack_dir, added, region_name, resolution_label, mesh_label, sources, dem_sources,
-                    method or ("improve" if sources is not None else "rebuild"))
+                    method or ("improve" if sources is not None else "rebuild"),
+                    sorted(photo_credits) if with_photos else None)
     return added
 
 
@@ -108,7 +113,7 @@ def _write_manifest(pack_dir: Path, added: list[Tile], region_name: str,
                     resolution_label: str, mesh_label: str,
                     sources: Optional[dict[Tile, str]] = None,
                     dem_sources: Optional[dict[Tile, str]] = None,
-                    method: str = "rebuild") -> None:
+                    method: str = "rebuild", photo_credits: Optional[list[str]] = None) -> None:
     manifest_path = pack_dir / MANIFEST
     tiles = set()
     known_sources: dict[str, str] = {}
@@ -119,6 +124,8 @@ def _write_manifest(pack_dir: Path, added: list[Tile], region_name: str,
             tiles = {tuple(t) for t in previous.get("tiles", [])}
             known_sources = dict(previous.get("sources", {}))
             known_dems = dict(previous.get("elevation_sources", {}))
+            if photo_credits is not None:
+                photo_credits = sorted(set(photo_credits) | set(previous.get("photos", [])))
         except (ValueError, OSError):
             tiles = set()
     tiles.update(added)
@@ -140,8 +147,17 @@ def _write_manifest(pack_dir: Path, added: list[Tile], region_name: str,
         "built": time.strftime("%Y-%m-%d %H:%M"),
         "tiles": sorted([list(t) for t in tiles]),
     }
+    if photo_credits is not None:
+        manifest["photos"] = photo_credits
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    if sources is not None:
+    if photo_credits is not None:
+        what = ("This pack contains a new terrain mesh with its own photo textures\n"
+                "(textures/*.dds) from official open-data aerial photos. Nothing else has to\n"
+                "run while you fly.\n\nPhotos:\n" + "".join(f"  {c}\n" for c in photo_credits) + "\n")
+    elif method == "rebuild" and sources:
+        what = ("This pack contains a new terrain mesh. Its photo textures are XPME's\n"
+                f"({', '.join(sorted(set(sources.values())))}): keep XPME installed and running.\n\n")
+    elif sources is not None:
         what = ("This pack is a copy of the terrain mesh you already had (see 'sources' in\n"
                 f"{MANIFEST}) with LiDAR elevations. Textures, water and roads still come\n"
                 "from the original packs - keep them installed (and XPME/AutoOrtho running).\n"
@@ -157,7 +173,7 @@ def _write_manifest(pack_dir: Path, added: list[Tile], region_name: str,
         + what
         + _credits(set(known_dems.values()))
         + ("Elevations applied with DSFTool (Laminar Research) to the source meshes listed above.\n"
-           if sources is not None else
+           if method == "improve" else
            "Mesh built with Ortho4XP by Oscar Pilote (GPL v3).\n"
            "Water/airport/road vector data (c) OpenStreetMap contributors (ODbL).\n")
     )

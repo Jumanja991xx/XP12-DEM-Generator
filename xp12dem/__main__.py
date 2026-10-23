@@ -46,10 +46,13 @@ def _cli_build(argv: list[str]) -> int:
                         help="1 = 1\" (30 m), 13 = 1/3\" (10 m where available), 3 = 3\" (90 m)")
     parser.add_argument("--mesh", choices=[m.key for m in MESH_DETAILS], default="high")
     parser.add_argument("--xplane", type=Path, help="X-Plane 12 folder (auto-detected)")
-    parser.add_argument("--target", choices=["xpme", "autoortho", "custom_scenery"], default="autoortho",
-                        help="'rebuild' only: xpme = Custom Scenery with XPME's photos, autoortho = "
+    parser.add_argument("--target", choices=["official", "xpme", "autoortho", "custom_scenery"], default="autoortho",
+                        help="'rebuild' only: official = official aerial photos (Bavaria/Austria/"
+                             "Switzerland) stored in the pack, xpme = Custom Scenery with XPME's photos, autoortho = "
                              "AutoOrtho's folder, custom_scenery = Custom Scenery with AutoOrtho photos "
                              "('improve' always uses Custom Scenery)")
+    parser.add_argument("--photo-zl", type=int, choices=[16, 17, 18], default=17,
+                        help="zoom level of official photos (17 = ~0.8 m, ~9 GB per tile)")
     parser.add_argument("--dem-folder", type=Path, help="folder with your own Sonny .hgt/.zip files")
     parser.add_argument("--parallel", type=int, default=0, help="tiles at once (0 = automatic)")
     parser.add_argument("--no-install", action="store_true", help="only build, keep the pack in the work folder")
@@ -66,7 +69,7 @@ def _cli_build(argv: list[str]) -> int:
         parser.error("X-Plane 12 not found, pass --xplane")
     ao = read_autoortho_config()
     extra_roots = [ao.ao_scenery_dir] if ao and ao.ao_scenery_dir else []
-    if args.method == "improve" or args.target in ("custom_scenery", "xpme"):
+    if args.method == "improve" or args.target in ("custom_scenery", "xpme", "official"):
         target = InstallTarget.for_custom_scenery(xplane)
     else:
         if ao is None or ao.ao_scenery_dir is None:
@@ -78,7 +81,9 @@ def _cli_build(argv: list[str]) -> int:
                            target=target, local_dem_source=args.dem_folder,
                            parallel=args.parallel or recommended_parallel(args.method), install=not args.no_install,
                            method=args.method, extra_roots=extra_roots,
-                           photos="xpme" if args.method == "rebuild" and args.target == "xpme" else "autoortho")
+                           photos=(args.target if args.method == "rebuild" and args.target in ("xpme", "official")
+                                   else "autoortho"),
+                           photo_zl=args.photo_zl)
     class CliEvents(Events):
         last = -1e9
 
