@@ -68,3 +68,23 @@ def test_inventory_flags_and_repairs_tiles_without_raster(tmp_path):
     assert info.no_raster == [(47, 11)]
     assert add_rasters(info, cache) == []
     assert read_pack(pack).no_raster == []
+
+
+def test_xpme_high_zoom_blocks(tmp_path, monkeypatch):
+    from xp12dem import paths, pipeline
+
+    monkeypatch.setattr(paths, "work_dir", lambda: tmp_path / "work")
+    xpme = tmp_path / "XPME_Europe"
+    (xpme / "Earth nav data" / "+40+010").mkdir(parents=True)
+    dsf = _dsf(xpme / "Earth nav data" / "+40+010" / "+47+011.dsf")
+    data = dsf.read_bytes()[:-16]
+    tert = d._atom("TERT", b"terrain/22928_34688_BI16.ter\0terrain/91712_138752_BI18.ter\0")
+    data = data.replace(d._atom("TERT", b""), tert)
+    # fix the DEFN length after growing TERT
+    i = data.index(b"NFED")
+    defn_len = struct.unpack("<I", data[i + 4:i + 8])[0] + len(tert) - 8
+    data = data[:i + 4] + struct.pack("<I", defn_len) + data[i + 8:]
+    dsf.write_bytes(data + hashlib.md5(data).digest())
+    pipe = pipeline.Pipeline.__new__(pipeline.Pipeline)
+    pipe._xpme_packs = {(47, 11): ("XPME_Europe", xpme)}
+    assert pipe._xpme_high_zoom((47, 11)) == ["91712_138752_BI18.dds"]

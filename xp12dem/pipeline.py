@@ -23,7 +23,7 @@ from .dem import Cancelled, DemStore, resolution
 from .eta import DEFAULT_BUILD, Estimator, TimingHistory, build_key
 from .installer import IMPROVE_PREFIX, MESH_PREFIX, ORTHO_PREFIX, InstallTarget, assemble_pack, install_pack, pack_name
 from .o4x_worker import PROGRESS_PREFIX
-from .regions import Tile, tile_name
+from .regions import Tile, dsf_relpath, tile_name
 
 
 @dataclass(frozen=True)
@@ -200,6 +200,7 @@ class Pipeline:
         self.highlights: dict[Tile, list] = {}  # tile -> where the height changed most
         self._install_dir: Optional[Path] = None
         self._fill_packs: dict = {}
+        self._xpme_packs: dict = {}  # tile -> (XPME pack name, folder) whose photos a new mesh uses
         self.photo_credits: set[str] = set()
         self.eta: Optional[Estimator] = None
         self._history = TimingHistory(paths.data_root() / "timings.json")
@@ -298,6 +299,7 @@ class Pipeline:
             if req.photos == "xpme":
                 self.events.stage("Finding XPME's photos")
                 photo_packs = self._photo_packs(todo, result)
+                self._xpme_packs = photo_packs
                 for tile in [t for t in todo if t not in photo_packs]:
                     eta.skip(tile)
                 todo = [t for t in todo if t in photo_packs]
@@ -447,6 +449,18 @@ class Pipeline:
             "cover_zl": max(18, self.req.photo_zl) if self.req.photos == "official" else 18,
             "water_tech": "XP12",
         }
+        if self.req.photos == "xpme" and tile in self._xpme_packs:
+            # Only zoom where XPME's own tile zooms: every other zoom-18 photo would have to
+            # be downloaded by XPME while X-Plane loads ("finishing asynchronous loading"
+            # for an hour with a few thousand of them around the small airfields).
+            high = self._xpme_high_zoom(tile)
+            if high is None:
+                job["cover_airports"] = "False"
+                self.events.log(f"{name}: could not read XPME's zoom levels - photos at zoom 16 only")
+            else:
+                job["cover_airports"] = "Existing"
+                job["existing_textures"] = high
+                self.events.log(f"{name}: zoom-18 photos where XPME has them ({len(high)} blocks)")
         if not job["global_scenery"]:
             self.events.log(f"{name}: X-Plane 12 Global Scenery not found - "
                             "DSF will be built without XP12 bathymetry rasters.")
@@ -455,6 +469,25 @@ class Pipeline:
         if self.req.photos == "official":
             self._make_photos(tile, build)
         return build
+
+    def _xpme_high_zoom(self, tile: Tile) -> Optional[list[str]]:
+        """Texture names (``row_col_BI18.dds``) of the blocks XPME shows above zoom 16."""
+        from . import reheight as RH
+
+        _, folder = self._xpme_packs[tile]
+        _, seven = RH.platform_tools(paths.ortho4xp_root())
+        tmp = paths.work_dir() / f"xpme_{tile_name(*tile)}"
+        tmp.mkdir(parents=True, exist_ok=True)
+        try:
+            dsf = RH.ensure_uncompressed(folder / dsf_relpath(*tile), seven, tmp)
+            blocks = RH.photo_blocks(RH.read_dsf_terrain_defs(dsf))
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return None
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if not blocks:
+            return None
+        return sorted(f"{row}_{col}_{code}{zl}.dds" for row, col, zl, code in blocks if zl > 16)
 
     def _run_mesh_worker(self, tile: Tile, job: dict, build_dir: Path) -> Path:
         name = tile_name(*tile)

@@ -305,6 +305,15 @@ def run_job(job: dict) -> int:
     tile.imprint_masks_to_dds = False
     tile.zone_list = []
     tile.write_to_config()
+    # "Existing": Ortho4XP takes the zoom level of each photo block from the names in
+    # textures/ - empty placeholders for the zoom-18 blocks XPME's own tile has
+    placeholders = []
+    for texture in job.get("existing_textures") or []:
+        path = Path(tile.build_dir) / "textures" / texture
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_bytes(b"")
+            placeholders.append(path)
 
     steps = (
         ("vector", "Downloading OpenStreetMap data (water, airports, roads)",
@@ -340,6 +349,8 @@ def run_job(job: dict) -> int:
             return 2
         emit("step_done", step=key, seconds=round(time.time() - started, 1))
 
+    for path in placeholders:
+        path.unlink(missing_ok=True)
     # X-Plane 12 needs an elevation raster in every mesh DSF - without one it
     # computes it from the triangles while loading, which can take hours.
     from xp12dem import dsf_raster

@@ -468,3 +468,11 @@ def test_photo_pack_ready_probes_xpme_terrain(tmp_path):
     (xpme / "terrain" / f"{RH._o4x_texture_stem(47.5, 11.5)}_BI16.ter").write_text("A\n800\nTERRAIN\n")
     assert RH.photo_pack_ready(xpme, (47, 11))
     assert RH._o4x_texture_stem(47.26, 11.35) == "22976_34832"
+
+
+def test_photo_blocks_from_terrain_names():
+    from xp12dem.reheight import photo_blocks
+
+    names = ["terrain/22928_34688_BI16.ter", "terrain/22928_34688_BI16_water_overlay.ter",
+             "terrain/91712_138752_BI18_sea.ter", "lib/g10/terrain10/fst_tmp_dry.ter"]
+    assert photo_blocks(names) == {(22928, 34688, 16, "BI"), (91712, 138752, 18, "BI")}

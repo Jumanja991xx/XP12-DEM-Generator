@@ -160,6 +160,19 @@ def read_dsf_terrain_defs(path: Path) -> list[str]:
     return []
 
 
+_BLOCK_RE = re.compile(r"(?:^|/)(\d+)_(\d+)_([A-Za-z0-9]+?)(\d{2})(?:_[a-z_]+)?\.ter$")
+
+
+def photo_blocks(terrain_defs: list[str]) -> set[tuple[int, int, int, str]]:
+    """(row, col, zoom, provider) of the Ortho4XP-style photo blocks a DSF uses."""
+    blocks = set()
+    for name in terrain_defs:
+        match = _BLOCK_RE.search(name)
+        if match:
+            blocks.add((int(match[1]), int(match[2]), int(match[4]), match[3]))
+    return blocks
+
+
 def missing_terrain(pack_dir: Path, dsf_path: Path) -> list[str]:
     """Pack-local terrain definitions a DSF needs but the pack does not contain."""
     try:
