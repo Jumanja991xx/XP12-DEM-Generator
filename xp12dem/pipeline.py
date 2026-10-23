@@ -449,6 +449,12 @@ class Pipeline:
             "cover_zl": max(18, self.req.photo_zl) if self.req.photos == "official" else 18,
             "water_tech": "XP12",
         }
+        # the tile's XPME DSF: zoom levels of its photos, XP12 rasters when the Global
+        # Scenery tile is not installed
+        xpme = self._xpme_packs.get(tile) or self._fill_packs.get(tile)
+        donor = self._xpme_dsf(tile, xpme[1]) if xpme else None
+        if donor is not None:
+            job["raster_donor"] = str(donor)
         if self.req.photos == "xpme" and tile in self._xpme_packs:
             # Only zoom where XPME's own tile zooms: every other zoom-18 photo would have to
             # be downloaded by XPME while X-Plane loads ("finishing asynchronous loading"
@@ -466,25 +472,43 @@ class Pipeline:
                             "DSF will be built without XP12 bathymetry rasters.")
         self.events.log(f"{name}: starting Ortho4XP")
         build = self._run_mesh_worker(tile, job, build_dir)
+        shutil.rmtree(paths.work_dir() / f"xpme_{name}", ignore_errors=True)
         if self.req.photos == "official":
             self._make_photos(tile, build)
         return build
+
+    def _xpme_dsf(self, tile: Tile, folder: Path) -> Optional[Path]:
+        """An uncompressed copy of XPME's DSF of the tile (kept for this build)."""
+        from . import reheight as RH
+
+        _, seven = RH.platform_tools(paths.ortho4xp_root())
+        tmp = paths.work_dir() / f"xpme_{tile_name(*tile)}"
+        copy = tmp / "xpme.dsf"
+        source = folder / dsf_relpath(*tile)
+        try:
+            if copy.is_file() and copy.stat().st_mtime >= source.stat().st_mtime:
+                return copy
+        except OSError:
+            return None
+        tmp.mkdir(parents=True, exist_ok=True)
+        try:
+            plain = RH.ensure_uncompressed(source, seven, tmp)
+            if plain == source:
+                shutil.copyfile(plain, copy)
+            else:
+                os.replace(plain, copy)
+            return copy
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return None
 
     def _xpme_high_zoom(self, tile: Tile) -> Optional[list[str]]:
         """Texture names (``row_col_BI18.dds``) of the blocks XPME shows above zoom 16."""
         from . import reheight as RH
 
-        _, folder = self._xpme_packs[tile]
-        _, seven = RH.platform_tools(paths.ortho4xp_root())
-        tmp = paths.work_dir() / f"xpme_{tile_name(*tile)}"
-        tmp.mkdir(parents=True, exist_ok=True)
-        try:
-            dsf = RH.ensure_uncompressed(folder / dsf_relpath(*tile), seven, tmp)
-            blocks = RH.photo_blocks(RH.read_dsf_terrain_defs(dsf))
-        except (OSError, RuntimeError, subprocess.SubprocessError):
+        dsf = self._xpme_dsf(tile, self._xpme_packs[tile][1])
+        if dsf is None:
             return None
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+        blocks = RH.photo_blocks(RH.read_dsf_terrain_defs(dsf))
         if not blocks:
             return None
         return sorted(f"{row}_{col}_{code}{zl}.dds" for row, col, zl, code in blocks if zl > 16)

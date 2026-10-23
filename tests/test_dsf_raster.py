@@ -40,21 +40,33 @@ def test_adds_lidar_elevation_raster(tmp_path):
     assert d.has_elevation(dsf) is False
     d.add_to_dsf(dsf, _hgt(tmp_path / "N47E011.hgt"))
     assert d.has_elevation(dsf) is True
-    (name, header, elev), = _read(dsf)
+    (name, header, elev), (bname, _, bathy) = _read(dsf)
     assert name == "elevation" and header[:5] == (1, 2, 1, 1201, 1201)
     assert elev[0, 0] == 500 and elev[-1, 0] == 2000  # DSF rasters: south row first
+    assert bname == "bathymetry" and bathy[0, 0] == 498
 
 
 def test_keeps_global_bathymetry_below_new_ground(tmp_path):
     old = np.full((1201, 1201), 100, "<i2")
     info = struct.pack("<BBHIIff", 1, 2, 1, 1201, 1201, 1.0, 0.0)
-    dems = (d._atom("DEMI", info) + d._atom("DEMD", old.tobytes())) * 2
-    dsf = _dsf(tmp_path / "a.dsf", b"elevation\0bathymetry\0", dems)
+    dems = (d._atom("DEMI", info) + d._atom("DEMD", old.tobytes())) * 3
+    dsf = _dsf(tmp_path / "a.dsf", b"elevation\0bathymetry\0other\0", dems)
     text = d.add_to_dsf(dsf, _hgt(tmp_path / "N47E011.hgt"))
     assert "bathymetry" in text
     rasters = _read(dsf)
-    assert [r[0] for r in rasters] == ["elevation", "bathymetry"]
+    assert [r[0] for r in rasters] == ["elevation", "bathymetry", "other"]  # nothing dropped
     assert rasters[0][2][0, 0] == 500 and rasters[1][2].max() == 100
+    assert (rasters[2][2] == 100).all()
+
+
+def test_takes_missing_rasters_from_donor(tmp_path):
+    info = struct.pack("<BBHIIff", 1, 2, 1, 1201, 1201, 1.0, 0.0)
+    old = np.full((1201, 1201), 7, "<i2")
+    donor = _dsf(tmp_path / "xpme.dsf", b"elevation\0bathymetry\0other\0",
+                 (d._atom("DEMI", info) + d._atom("DEMD", old.tobytes())) * 3)
+    dsf = _dsf(tmp_path / "mine.dsf")
+    d.add_to_dsf(dsf, _hgt(tmp_path / "N47E011.hgt"), donor=donor)
+    assert [r[0] for r in _read(dsf)] == ["elevation", "bathymetry", "other"]
 
 
 def test_inventory_flags_and_repairs_tiles_without_raster(tmp_path):

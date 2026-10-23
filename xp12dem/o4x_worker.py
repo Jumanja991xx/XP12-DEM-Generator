@@ -357,7 +357,8 @@ def run_job(job: dict) -> int:
 
     dsf = FNAMES.dsf_file(tile.build_dir, lat, lon)
     try:
-        emit("log", message="XP12 " + dsf_raster.add_to_dsf(Path(dsf), Path(job["dem_file"])))
+        donor = Path(job["raster_donor"]) if job.get("raster_donor") else None
+        emit("log", message="XP12 " + dsf_raster.add_to_dsf(Path(dsf), Path(job["dem_file"]), donor))
     except (OSError, ValueError) as exc:
         emit("warning", message=f"could not write the XP12 elevation raster: {exc}")
     emit("done", dsf=dsf)

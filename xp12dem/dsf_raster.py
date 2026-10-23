@@ -76,43 +76,62 @@ def parse_rasters(names: bytes, dems: bytes) -> list[tuple[str, tuple, np.ndarra
     return out
 
 
+def _raster_atoms(header: tuple, samples: np.ndarray) -> bytes:
+    version, bpp, flags, w, h, scale, offset = header
+    info = struct.pack("<BBHIIff", version, bpp, flags, w, h, scale, offset)
+    dtype = "<i2" if flags & 1 else "<u2"
+    return _atom("DEMI", info) + _atom("DEMD", samples.astype(dtype).tobytes())
+
+
 def build(dem_file: Path, names: bytes = b"", dems: bytes = b"") -> tuple[bytes, bytes, str]:
     """DEMN and DEMS contents with the elevation raster from ``dem_file``.
 
-    ``names``/``dems`` are the rasters Ortho4XP took from the Global Scenery
-    (may be empty): their bathymetry is kept (never above the new ground - 2 m,
-    as Ortho4XP does), their elevation only fills gaps of our data.
+    ``names``/``dems`` are the rasters taken from the Global Scenery (or XPME's DSF of
+    the tile; may be empty). All of them are kept as they are - X-Plane 12 expects
+    the full set - except: elevation gets our heights (theirs only fill gaps),
+    bathymetry stays at least 2 m below the new ground (as Ortho4XP does).
     Returns (DEMN, DEMS, short description for the log).
     """
-    old = {name: (header, samples) for name, header, samples in parse_rasters(names, dems)}
+    old = parse_rasters(names, dems)
+    labels = [s.decode("utf-8", "replace") for s in names.split(b"\0") if s]
+    infos = [d for t, d in _sub_atoms(dems) if t == "DEMI"]
+    datas = [d for t, d in _sub_atoms(dems) if t == "DEMD"]
+    by_name = {name: (header, samples) for name, header, samples in old}
     size = SIZE
-    if "elevation" in old and old["elevation"][0][1] == 2:
-        size = old["elevation"][0][3]
+    if "elevation" in by_name and by_name["elevation"][0][1] == 2:
+        size = by_name["elevation"][0][3]
     elev = lidar_elevation(dem_file, size).astype(np.int32)
-    if "elevation" in old and old["elevation"][1].shape == elev.shape:
-        header = old["elevation"][0]
-        prev = old["elevation"][1].astype(np.float64) * header[5] + header[6]
+    if "elevation" in by_name and by_name["elevation"][1].shape == elev.shape:
+        header = by_name["elevation"][0]
+        prev = by_name["elevation"][1].astype(np.float64) * header[5] + header[6]
         elev = np.where(elev <= NODATA + 1, np.round(prev), elev)
-    elev = np.where(elev <= NODATA + 1, 0, elev)
-    elev16 = np.clip(elev, -32767, 32767).astype("<i2")
+    elev = np.clip(np.where(elev <= NODATA + 1, 0, elev), -32767, 32767)
+    plain = (1, 2, 1, size, size, 1.0, 0.0)
 
-    def raster(samples: np.ndarray) -> bytes:
-        h, w = samples.shape
-        info = struct.pack("<BBHIIff", 1, 2, 1, w, h, 1.0, 0.0)
-        return _atom("DEMI", info) + _atom("DEMD", samples.astype("<i2").tobytes())
-
-    out_names = [b"elevation"]
-    out = raster(elev16)
-    what = "LiDAR elevation raster"
-    bathy = old.get("bathymetry")
-    if bathy is not None and bathy[0][1] == 2 and bathy[1].shape == elev16.shape:
-        safe = np.minimum(bathy[1].astype(np.int32), elev16.astype(np.int32) - 2)
-        out_names.append(b"bathymetry")
-        out += raster(np.clip(safe, -32767, 32767))
-        what += " + Global Scenery bathymetry"
-    else:
-        what += " (no Global Scenery DSF for this tile: no bathymetry)"
-    return b"".join(n + b"\0" for n in out_names), out, what
+    out_names, out = [], b""
+    kept = []
+    for i, name in enumerate(labels):
+        if name == "elevation" or i >= len(infos) or i >= len(datas):
+            continue
+        header, samples = by_name.get(name, (None, None))
+        if name == "bathymetry" and header is not None and header[1] == 2 and samples.shape == elev.shape:
+            safe = np.minimum(samples.astype(np.int32) * header[5] + header[6], elev - 2)
+            out_names.append(name)
+            out += _raster_atoms(plain, np.clip(np.round(safe), -32767, 32767))
+        else:  # any other raster: untouched
+            out_names.append(name)
+            out += _atom("DEMI", infos[i]) + _atom("DEMD", datas[i])
+        kept.append(name)
+    if "bathymetry" not in kept:
+        # no source for it: water bottoms 2 m under the surface (better than none -
+        # without it X-Plane derives it while loading)
+        out_names.insert(0, "bathymetry")
+        out = _raster_atoms(plain, elev - 2) + out
+        kept.insert(0, "bathymetry (2 m below ground)")
+    out_names.insert(0, "elevation")
+    out = _raster_atoms(plain, elev) + out
+    what = "rasters: LiDAR elevation + " + ", ".join(kept)
+    return b"".join(n.encode() + b"\0" for n in out_names), out, what
 
 
 # ---------------------------------------------------------------------------
@@ -124,8 +143,8 @@ def _top_atoms(data: bytes) -> list[tuple[str, bytes]]:
     return _sub_atoms(data[12:-16])
 
 
-def has_elevation(dsf: Path) -> Optional[bool]:
-    """True/False for an uncompressed DSF, None when it cannot be read."""
+def raster_names(dsf: Path) -> Optional[list[str]]:
+    """Raster names of an uncompressed DSF, None when it cannot be read."""
     try:
         with open(dsf, "rb") as handle:
             head = handle.read(12)
@@ -134,27 +153,47 @@ def has_elevation(dsf: Path) -> Optional[bool]:
             while True:
                 hdr = handle.read(8)
                 if len(hdr) < 8:
-                    return False
+                    return []
                 tag = hdr[:4][::-1]
                 length = struct.unpack("<I", hdr[4:])[0]
                 if length < 8:
-                    return False
+                    return []
                 if tag == b"DEFN":
                     body = handle.read(length - 8)
                     names = dict(_sub_atoms(body)).get("DEMN", b"")
-                    return b"elevation\0" in names
+                    return [n.decode("utf-8", "replace") for n in names.split(b"\0") if n]
                 handle.seek(length - 8, 1)
     except OSError:
         return None
 
 
-def add_to_dsf(dsf: Path, dem_file: Path) -> str:
-    """Write (or replace) the elevation raster of an uncompressed DSF in place."""
+def has_elevation(dsf: Path) -> Optional[bool]:
+    """Does the DSF carry the rasters X-Plane 12 needs (elevation and bathymetry)?
+    None when it cannot be read."""
+    names = raster_names(dsf)
+    return None if names is None else {"elevation", "bathymetry"} <= set(names)
+
+
+def rasters_of(dsf: Path) -> tuple[bytes, bytes]:
+    """(DEMN, DEMS) contents of an uncompressed DSF."""
+    atoms = dict(_top_atoms(Path(dsf).read_bytes()))
+    return dict(_sub_atoms(atoms.get("DEFN", b""))).get("DEMN", b""), atoms.get("DEMS", b"")
+
+
+def add_to_dsf(dsf: Path, dem_file: Path, donor: Optional[Path] = None) -> str:
+    """Write (or replace) the elevation raster of an uncompressed DSF in place.
+    ``donor``: another DSF of the same tile (XPME's) whose other rasters are used
+    when this one has none."""
     data = Path(dsf).read_bytes()
     atoms = _top_atoms(data)
     defn = dict(atoms).get("DEFN", b"")
     names = dict(_sub_atoms(defn)).get("DEMN", b"")
     dems = dict(atoms).get("DEMS", b"")
+    if donor is not None and b"bathymetry\0" not in names:
+        try:
+            names, dems = rasters_of(donor)
+        except (OSError, ValueError):
+            pass
     new_names, new_dems, what = build(dem_file, names, dems)
     body = b""
     for tag, content in atoms:

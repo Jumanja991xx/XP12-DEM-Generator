@@ -165,8 +165,14 @@ def cached_dem_file(cache_dir: Path, tile: Tile, resolution: str = "") -> Option
     return None
 
 
-def add_rasters(pack: InstalledPack, cache_dir: Path) -> list[Tile]:
-    """Write the missing elevation rasters from the cached DEMs; returns tiles left without."""
+def add_rasters(pack: InstalledPack, cache_dir: Path, xplane: Optional[Path] = None,
+                work: Optional[Path] = None) -> list[Tile]:
+    """Write the missing XP12 rasters: elevation from the cached DEM, the others from
+    XPME's DSF of the tile when there is one. Returns the tiles left without."""
+    import shutil
+
+    from . import paths
+    from . import reheight as RH
     from .dsf_raster import add_to_dsf
     from .regions import dsf_relpath
 
@@ -176,7 +182,19 @@ def add_rasters(pack: InstalledPack, cache_dir: Path) -> list[Tile]:
         if dem is None:
             left.append(tile)
             continue
-        add_to_dsf(pack.path / dsf_relpath(*tile), dem)
+        donor, tmp = None, Path(work or paths.work_dir()) / "raster_donor"
+        found = RH.find_photo_pack(tile, xplane) if xplane is not None else None
+        if found is not None:
+            try:
+                tmp.mkdir(parents=True, exist_ok=True)
+                _, seven = RH.platform_tools(paths.ortho4xp_root())
+                donor = RH.ensure_uncompressed(found[1] / dsf_relpath(*tile), seven, tmp)
+            except (OSError, RuntimeError):
+                donor = None
+        try:
+            add_to_dsf(pack.path / dsf_relpath(*tile), dem, donor)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
     pack.no_raster = left
     return left
 

@@ -523,7 +523,7 @@ class MainWindow(QMainWindow):
                 if p.no_raster:
                     names = ", ".join(regions.tile_name(*t) for t in p.no_raster[:6])
                     more = f" … (+{len(p.no_raster) - 6})" if len(p.no_raster) > 6 else ""
-                    why.append(f"{len(p.no_raster)} tile(s) lack the X-Plane 12 elevation raster "
+                    why.append(f"{len(p.no_raster)} tile(s) lack the X-Plane 12 elevation/water rasters "
                                f"({names}{more}) - X-Plane then computes it while loading, which can "
                                "hang at 'finishing asynchronous loading' for hours. Fix now adds it "
                                "from your downloaded elevation data in a few seconds")
@@ -550,7 +550,7 @@ class MainWindow(QMainWindow):
                     from ..inventory import add_rasters
 
                     todo = len(pack.no_raster)
-                    left = add_rasters(pack, paths.dem_cache_dir())
+                    left = add_rasters(pack, paths.dem_cache_dir(), self.xplane)
                     rasters += todo - len(left)
                     no_dem += left
                 if pack.broken:
