@@ -578,9 +578,11 @@ class Pipeline:
         self.events.log(f"{name}: [photos] {len(textures)} textures (zoom {', '.join(map(str, zls))}) "
                         "from official aerial photos" + (f", gaps from {fill[0]}" if fill else ""))
         fetcher = imagery.Fetcher(paths.data_root() / "photos", cancel=self.cancel_event.is_set)
+        balancer = imagery.Balancer()  # evens out the colours of different flights
         try:
             stats = imagery.build_textures(textures, build_dir / "textures", layers, fetcher,
-                                           log=lambda text: self.events.log(f"{name}:   {text}"))
+                                           log=lambda text: self.events.log(f"{name}:   {text}"),
+                                           balancer=balancer)
         except RuntimeError:
             if self.cancel_event.is_set():
                 raise Cancelled()
@@ -588,14 +590,15 @@ class Pipeline:
         finally:
             fetcher.close()
         used = ", ".join(f"{k} {v}" for k, v in stats["sources"].items() if v)
-        self.events.log(f"{name}:   photos done: {stats['written']} new, {stats['skipped']} kept ({used})")
+        self.events.log(f"{name}:   photos done: {stats['written']} new, {stats['skipped']} kept ({used}; "
+                        f"{stats['balanced']} colour-balanced against Sentinel-2)")
         if stats["missing_share"] > 0.01:
             self.events.log(f"{name}: warning - {stats['missing_share']:.0%} of the area has no official "
                             "photo (outside Bavaria / Austria / Switzerland)"
                             + ("" if fill else " and was filled with an average colour - start XPME to "
                                "fill it with XPME's photos"))
         with self._lock:
-            self.photo_credits |= set(imagery.credits(stats, layers))
+            self.photo_credits |= set(imagery.credits(stats, layers, balancer))
 
     def _photo_packs(self, tiles: list[Tile], result: BuildResult) -> dict:
         """The XPME package whose photos each tile's new mesh will use."""
