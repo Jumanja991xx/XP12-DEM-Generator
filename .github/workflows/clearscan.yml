@@ -1,0 +1,29 @@
+name: ClearScan test pack
+
+# Builds the ClearScan test scenery (Unter-/Oberschleissheim, airfield EDNX left to the
+# X-Plane gateway) from Bavarian open data and offers it as a download under "Artifacts".
+on:
+  push:
+    branches: [main]
+    paths: ["packaging/clearscan/**", ".github/workflows/clearscan.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy pillow pyproj shapely scipy requests tifffile imagecodecs
+      - name: Build pack
+        run: python packaging/clearscan/build_clearscan.py out
+      - run: cat out/stats.json && du -sh out/ClearScan_Schleissheim
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClearScan_Schleissheim
+          path: out/ClearScan_Schleissheim
+          retention-days: 30
+          compression-level: 6
