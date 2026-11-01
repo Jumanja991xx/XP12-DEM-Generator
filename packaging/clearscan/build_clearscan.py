@@ -46,6 +46,8 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "dommesh"))
 sys.path.insert(0, str(REPO))
 import textures as T  # noqa: E402
+import roofs as R2  # noqa: E402
+import trees as TR  # noqa: E402
 from slpk import Slpk  # noqa: E402
 from xp12dem.imagery import write_dds  # noqa: E402
 
@@ -55,8 +57,6 @@ DSFTOOL = REPO / "third_party" / "Ortho4XP" / "Utils" / "lin" / "DSFTool"
 CIRCLES = [(11.5640, 48.2510, 1300), (11.5770, 48.2808, 1300), (11.5835, 48.2490, 450),
            (11.5594, 48.2394, 900)]
 CELL = 400.0                 # m: buildings are grouped into objects per cell
-ROOF_TEXEL = 0.12            # m per roof texel
-PAGE = 2048
 to_utm = Transformer.from_crs(4326, 25832, always_xy=True)
 to_ll = Transformer.from_crs(25832, 4326, always_xy=True)
 t0 = time.time()
@@ -153,7 +153,7 @@ with ThreadPoolExecutor(6) as pool:
                                   WORK / "lod2" / f"{t[0]}_{t[1]}.gml", 2000), LOD))
 NB = "{http://www.opengis.net/citygml/building/1.0}"
 NG = "{http://www.opengis.net/gml}"
-buildings = []
+buildings, mask_fp = [], []
 for t in LOD:
     for ev, el in ET.iterparse(WORK / "lod2" / f"{t[0]}_{t[1]}.gml", events=("end",)):
         if el.tag != NB + "Building":
@@ -168,6 +168,10 @@ for t in LOD:
         if surfs:
             allp = np.vstack([s[1] for s in surfs])
             c = allp[:, :2].mean(0)
+            try:                                       # every building masks trees, also outside the area
+                mask_fp.append(Polygon(allp[:, :2]).convex_hull if len(allp) > 2 else None)
+            except Exception:
+                pass
             if area.contains(Point(c)):
                 gs = None
                 for g in el.iter(NB + "GroundSurface"):
@@ -347,8 +351,8 @@ for bi, b in enumerate(normal_b):
         acc += col[ok].sum(0)
         cnt += int(ok.sum())
     c = acc / cnt if cnt > 10 else np.array([205, 198, 186.0])
-    c = c * 1.18 + 12
-    c = c.mean() + (c - c.mean()) * 0.8
+    c = c * 1.08 + 6
+    c = c.mean() + (c - c.mean()) * 1.15
     b["plaster"] = np.clip(c, 60, 238)
 log("Putzfarben")
 
@@ -460,37 +464,15 @@ def wall_triangles(b, a, n, door_wall, rng_b):
     return out
 
 
-class Shelf:
-    def __init__(self, size):
-        self.size = size
-        self.img = np.full((size, size, 3), 128, np.uint8)
-        self.x = self.y = self.h = self.used_w = 0
-
-    def place(self, im):
-        th, tw = im.shape[:2]
-        if tw > self.size or th > self.size:
-            return None
-        if self.x + tw > self.size:
-            self.x, self.y, self.h = 0, self.y + self.h, 0
-        if self.y + th > self.size:
-            return None
-        x, y = self.x, self.y
-        self.img[y:y + th, x:x + tw] = im[::-1]
-        self.x += tw
-        self.used_w = max(self.used_w, self.x)
-        self.h = max(self.h, th)
-        return x, y
-
-
-def roof_image(b, a, n):
-    """(image rows bottom-up, triangles [(world, (u,v metres))], w, h, texel) for one roof face."""
+def roof_faces(b, a, n, atlas):
+    """[(world tri 3x3, atlas item, (u, v) metres inside the tile)] for one roof face."""
     flat = n[2] > 0.985
     if flat:
         uax = np.array([1.0, 0, 0]) - n * n[0]
         uax /= np.linalg.norm(uax)
         vax = np.cross(n, uax)
     else:
-        vax = np.array([0, 0, 1.0]) - n * n[2]
+        vax = np.array([0, 0, 1.0]) - n * n[2]          # v points up the slope
         vax /= np.linalg.norm(vax)
         uax = np.cross(vax, n)
     o = a[0]
@@ -499,25 +481,32 @@ def roof_image(b, a, n):
     uv -= mn
     w, h = uv.max(0)
     if w < 0.3 or h < 0.3:
-        return None
-    tx = ROOF_TEXEL if max(w, h) / ROOF_TEXEL < PAGE - 8 else max(w, h) / (PAGE - 8)
+        return []
     o2 = o + uax * mn[0] + vax * mn[1]
     step = 0.3
-    gu, gv = np.meshgrid(np.arange(0, w + step, step), np.arange(0, h + step, step))
-    W = o2 + gu[..., None] * uax + gv[..., None] * vax + n * 0.3
-    col, ok = sample(W.reshape(-1, 3), n, 0.5)
-    base = np.median(col[ok], 0) if ok.mean() > 0.2 else b.get("roof_fallback", np.array([150, 90, 70.0]))
-    field = np.where(ok[:, None], col, base).reshape(gu.shape + (3,)).astype(np.float32)
-    pat = T.roof_pattern(w, h, base, flat, hash((round(o[0]), round(o[1]))) & 0xFFFF, tx)
-    th_, tw_ = pat.shape
-    big = np.stack([np.asarray(Image.fromarray(field[..., c], "F").resize((tw_, th_), Image.BILINEAR))
-                    for c in range(3)], -1)
-    img = np.clip(big * pat[..., None], 0, 255).astype(np.uint8)
-    tris = []
-    for t2 in tris2d(Polygon(uv).buffer(0)):
-        world = o2 + t2[:, :1] * uax + t2[:, 1:2] * vax + n * 0.02
-        tris.append((world, t2))
-    return img, tris, tx
+    gu, gv = np.meshgrid(np.arange(0.15, w, step), np.arange(0.15, h, step))
+    W = o2 + gu.reshape(-1, 1) * uax + gv.reshape(-1, 1) * vax + n * 0.3
+    col, ok = sample(W, n, 0.5)
+    poly = Polygon(uv).buffer(0)
+    if len(ok):
+        ok &= shapely.contains_xy(poly, gu.ravel(), gv.ravel())
+    c = R2.robust_colour(col, ok) if len(ok) else None
+    if c is None:
+        c = b.get("roof_colour", np.array([150, 82, 62.0]))
+    b["roof_colour"] = c
+    item = atlas.add(R2.material_of(c, flat, b["kind"], b["area"]), c)
+    rng = np.random.default_rng(int(abs(o[0] * 13 + o[1] * 7)) % 100000)
+    du, dv = rng.uniform(0, R2.TILE_M, 2) if flat else (rng.uniform(0, R2.TILE_M), 0.0)
+    out = []
+    TM = R2.TILE_M
+    for i in range(int((w + du) // TM) + 1):
+        for j in range(int((h + dv) // TM) + 1):
+            u0, v0 = i * TM - du, j * TM - dv
+            piece = poly.intersection(box(u0, v0, u0 + TM, v0 + TM))
+            for t2 in tris2d(piece):
+                world = o2 + t2[:, :1] * uax + t2[:, 1:2] * vax + n * 0.02
+                out.append((world, item, np.column_stack([t2[:, 0] - u0, t2[:, 1] - v0])))
+    return out
 
 
 # --------------------------------------------------------------------------- OBJ-Ausgabe
@@ -554,18 +543,15 @@ def write_obj(name, tex, tris, uvs, nrm, lon0, lat0, h0, lit=None, lod=(0, 7000)
 
 
 placements = []           # (obj name, lon, lat)
-stats = {"walls": 0, "roofs": 0, "roof_pages": 0, "landmark_tris": 0}
+stats = {"walls": 0, "roofs": 0, "landmark_tris": 0}
 groups = {}
 for b in normal_b:
     c = b["fp"].centroid
     groups.setdefault((int(c.x // CELL), int(c.y // CELL)), []).append(b)
+atlas = R2.RoofAtlas()
+cell_geo = {}
 for (gx, gy), bl in sorted(groups.items()):
-    ce, cn = (gx + 0.5) * CELL, (gy + 0.5) * CELL
-    lon0, lat0 = to_ll.transform(ce, cn)
-    h0 = float(ground(np.array([ce]), np.array([cn]))[0])
-    W_tris, W_uv, W_n = [], [], []
-    pages, cur = [], None
-    R = {}                 # page index -> lists
+    W_tris, W_uv, W_n, RF = [], [], [], []
     for b in bl:
         rng_b = np.random.default_rng(int(b["fp"].centroid.x * 7 + b["fp"].centroid.y))
         b["kind"] = kind_of(b)
@@ -579,46 +565,27 @@ for (gx, gy), bl in sorted(groups.items()):
                 W_uv.append(uv)
                 W_n.append(n)
         for a, n in b["roofs"]:
-            r = roof_image(b, a, n)
-            if r is None:
-                continue
-            img, tris, tx = r
-            if cur is None or (pos := cur.place(img)) is None:
-                cur = Shelf(PAGE)
-                pages.append(cur)
-                pos = cur.place(img)
-                if pos is None:
-                    continue
-            pi = len(pages) - 1
-            x, y = pos
-            th = img.shape[0]
-            for world, t2 in tris:
-                tu = x + 1 + t2[:, 0] / tx                     # pixels; scaled when the page is cropped
-                tv = y + th - 1 - t2[:, 1] / tx
-                R.setdefault(pi, ([], [], []))
-                R[pi][0].append(world)
-                R[pi][1].append(np.column_stack([tu, tv]))
-                R[pi][2].append(n)
+            for world, item, luv in roof_faces(b, a, n, atlas):
+                RF.append((world, item, luv, n))
+    cell_geo[(gx, gy)] = (W_tris, W_uv, W_n, RF)
+write_dds(atlas.build(), OBJ_DIR / "roofs.dds")
+log("Dach-Atlas", len(atlas.items), "Dachflächen,", len(atlas.cells), "Material-Farben")
+for (gx, gy), (W_tris, W_uv, W_n, RF) in sorted(cell_geo.items()):
+    ce, cn = (gx + 0.5) * CELL, (gy + 0.5) * CELL
+    lon0, lat0 = to_ll.transform(ce, cn)
+    h0 = float(ground(np.array([ce]), np.array([cn]))[0])
     if W_tris:
         name = f"walls_{gx}_{gy}"
         stats["walls"] += write_obj(name, "facade.dds", np.array(W_tris), np.array(W_uv), np.array(W_n),
                                     lon0, lat0, h0, lit="facade_LIT.dds")
         placements.append((name, lon0, lat0))
-    for pi, page in enumerate(pages):
-        if pi not in R:
-            continue
-        name = f"roofs_{gx}_{gy}_{pi}"
-        pw = 1 << max(6, int(math.ceil(math.log2(max(page.used_w, 1)))))
-        ph = 1 << max(6, int(math.ceil(math.log2(max(page.y + page.h, 1)))))
-        write_dds(page.img[:ph, :pw], OBJ_DIR / f"{name}.dds")
-        ruv = np.array(R[pi][1])
-        ruv[..., 0] /= pw
-        ruv[..., 1] = 1 - ruv[..., 1] / ph
-        stats["roofs"] += write_obj(name, f"{name}.dds", np.array(R[pi][0]), ruv,
-                                    np.array(R[pi][2]), lon0, lat0, h0)
-        stats["roof_pages"] += 1
+    if RF:
+        name = f"roofs_{gx}_{gy}"
+        uvs = np.array([np.column_stack(atlas.uv(item, luv[:, 0], luv[:, 1])) for _, item, luv, _ in RF])
+        stats["roofs"] += write_obj(name, "roofs.dds", np.array([r[0] for r in RF]), uvs,
+                                    np.array([r[3] for r in RF]), lon0, lat0, h0)
         placements.append((name, lon0, lat0))
-    log(f"Zelle {gx},{gy}: {len(bl)} Gebäude, {len(pages)} Dachseiten")
+log("Gebäude-Objekte", stats)
 
 for name, pos, uv, img in landmark_parts:
     e0, n0 = (pos[:, 0].min() + pos[:, 0].max()) / 2, (pos[:, 1].min() + pos[:, 1].max()) / 2
@@ -643,7 +610,32 @@ with ThreadPoolExecutor(4) as pool:
     list(pool.map(lambda t: fetch(f"https://download1.bayernwolke.de/a/dom20/DOM/32{t[0]}_{t[1]}_20_DOM.tif",
                                   WORK / "dom" / f"{t[0]}_{t[1]}.tif", 1_000_000), dom_tiles))
 RES = 0.4
-all_fp = [b["fp"].buffer(1.2) for b in buildings]
+BROAD_MIX = [("linde", 30), ("ahorn", 30), ("eiche", 14), ("buche", 16), ("birke", 10)]
+
+
+def species_of(con, peaked, h, crown, lum, rgb, e, n):
+    """Plausible species from crown shape and aerial colour (no species map for single trees)."""
+    rnd = (math.sin(e * 12.9898 + n * 78.233) * 43758.5453) % 1.0
+    if con:
+        if not peaked and h > 12:
+            return "kiefer"                            # flat, irregular crown on a tall trunk
+        if lum > 70 and rnd < 0.35:
+            return "laerche"                           # lighter green conifer
+        return "fichte"
+    if h > 18 and crown / h < 0.13 and rnd < 0.6:
+        return "pappel"                                # columnar
+    if lum > 100 and h < 18 and rnd < 0.5:
+        return "birke"                                 # bright, light crown
+    tot = sum(w for _, w in BROAD_MIX)
+    acc = 0.0
+    for name, w in BROAD_MIX:
+        acc += w / tot
+        if rnd < acc:
+            return name
+    return "linde"
+
+
+all_fp = [b["fp"].buffer(1.2) for b in buildings] + [p.buffer(1.2) for p in mask_fp if p is not None and p.area > 1]
 fp_tree = shapely.STRtree(all_fp)
 trees = []
 for x, y in dom_tiles:
@@ -687,36 +679,50 @@ for x, y in dom_tiles:
     peaked = (hs - sub.mean(1)) / np.maximum(hs, 1) > 0.09
     lum = d[rows, cols_] @ [0.3, 0.59, 0.11]
     con = (lum < 62) | (peaked & (lum < 85))
+    rgb_t = d[rows, cols_]
+    dn = cKDTree(np.column_stack([E, N])).query(np.column_stack([E, N]), k=2)[0][:, 1] if len(E) > 1 \
+        else np.full(len(E), 10.0)
+    crown = np.minimum(np.clip(0.16 * hs + 0.8, 1.2, 7.5), 0.62 * dn + 0.6)
     for i in range(len(E)):
-        trees.append((E[i], N[i], hs[i], bool(con[i]), lum[i]))
+        trees.append((E[i], N[i], hs[i], species_of(con[i], peaked[i], hs[i], crown[i], lum[i], rgb_t[i], E[i], N[i])))
     log(f"Bäume {x},{y}: {len(E)}")
 log("Bäume gesamt", len(trees))
 
-# Waldarten: Höhenklassen x Laub/Nadel, jeweils 4 Helligkeitsvarianten
+# Waldarten: Baumart x Höhenklasse; Texturen je Jahreszeit, X-Plane wählt über library.txt
 FOR_DIR = PACK / "forests"
-FOR_DIR.mkdir(parents=True, exist_ok=True)
-atlas = T.tree_atlas()
-Image.fromarray(atlas, "RGBA").save(FOR_DIR / "clearscan_trees.png")
+for season in TR.SEASONS:
+    (FOR_DIR / season).mkdir(parents=True, exist_ok=True)
+    Image.fromarray(TR.season_atlas(season), "RGBA").save(FOR_DIR / season / "trees.png")
 H_EDGES = [3, 7, 10, 13, 16, 20, 25, 40]
 for_defs, for_points = [], {}
-for con in (False, True):
+lib = {s: [] for s in TR.SEASONS}
+for sp in TR.NAMES:
     for hi in range(len(H_EDGES) - 1):
         lo_h, hi_h = H_EDGES[hi], H_EDGES[hi + 1]
-        name = f"{'conifer' if con else 'broadleaf'}_{lo_h}_{hi_h}"
-        t_px = 0 if con else 512
-        lines = ["A", "800", "FOREST", "", "TEXTURE clearscan_trees.png", "SCALE_X 2048", "SCALE_Y 1024",
-                 "SPACING 6 6", "RANDOM 3 3", "SKIP_SURFACE water", "",
-                 "#    s     t     w     y  offset freq min_h max_h quads type name"]
-        for v in range(4):
-            lines.append(f"TREE {v * 512} {t_px} 512 512 256 25 {lo_h} {min(hi_h, 38)} 2 0 v{v}")
-        (FOR_DIR / f"{name}.for").write_text("\n".join(lines) + "\n")
+        name = f"{sp}_{lo_h}_{hi_h}"
+        for season in TR.SEASONS:
+            (FOR_DIR / season / f"{name}.for").write_text(
+                TR.for_text(sp, lo_h, min(hi_h, 38), "trees.png"))
+            lib[season].append((f"clearscan/trees/{name}.for", f"forests/{season}/{name}.for"))
         for_defs.append(name)
         for_points[name] = []
-for e, n, h, con, lum in trees:
+for e, n, h, sp in trees:
     hi = int(np.clip(np.searchsorted(H_EDGES, h) - 1, 0, len(H_EDGES) - 2))
-    name = f"{'conifer' if con else 'broadleaf'}_{H_EDGES[hi]}_{H_EDGES[hi + 1]}"
     lon, lat = to_ll.transform(e, n)
-    for_points[name].append((lon, lat))
+    for_points[f"{sp}_{H_EDGES[hi]}_{H_EDGES[hi + 1]}"].append((lon, lat))
+for_defs = [f for f in for_defs if for_points[f]]
+head = ["A", "800", "LIBRARY", ""]
+SEASON_NAMES = {"spr": "fruehling", "sum": "sommer", "fal": "herbst", "win": "winter"}
+(PACK / "library.txt").write_text("\n".join(
+    head + ["# Baeume wechseln mit der Jahreszeit (X-Plane 12)"]
+    + [f"EXPORT_SEASON {season} {v} {r}" for season in TR.SEASONS for v, r in lib[season]]) + "\n")
+alt = PACK / "library_feste_jahreszeit"
+alt.mkdir(exist_ok=True)
+for season in TR.SEASONS:
+    (alt / f"library_{SEASON_NAMES[season]}.txt").write_text("\n".join(
+        head + [f"# Feste Jahreszeit: {SEASON_NAMES[season]}"] + [f"EXPORT {v} {r}" for v, r in lib[season]]) + "\n")
+species_count = {sp: sum(len(for_points[f]) for f in for_points if f.startswith(sp + "_")) for sp in TR.NAMES}
+log("Baumarten", species_count)
 
 # --------------------------------------------------------------------------- DSF
 excl = []
@@ -736,7 +742,7 @@ for kind in ("obj", "fac", "for"):
 lines += ["PROPERTY sim/west 11", "PROPERTY sim/east 12", "PROPERTY sim/south 48", "PROPERTY sim/north 49", ""]
 names = sorted({p[0] for p in placements})
 lines += [f"OBJECT_DEF objects/{n}.obj" for n in names]
-lines += [f"POLYGON_DEF forests/{f}.for" for f in for_defs] + [""]
+lines += [f"POLYGON_DEF clearscan/trees/{f}.for" for f in for_defs] + [""]
 idx = {n: i for i, n in enumerate(names)}
 lines += [f"OBJECT {idx[n]} {lo:.9f} {la:.9f} 0.0" for n, lo, la in placements]
 n_trees = 0
@@ -767,9 +773,12 @@ if not dsf.exists():
     "simHeaven/X-World und anderen Overlays (X-Plane traegt neue Ordner oben ein).\n\n"
     "Quellen: Bayerische Vermessungsverwaltung - LoD2, DOM20, DGM1, DOP40, DOM-Mesh\n"
     "(www.geodaten.bayern.de, CC BY 4.0); Flugplatzgrenze: OpenStreetMap (ODbL).\n"
+    "Jahreszeiten: Die Baeume wechseln automatisch (library.txt, EXPORT_SEASON). Falls X-Plane\n"
+    "die Baeume nicht findet oder nur eine Jahreszeit gewuenscht ist: library.txt durch eine Datei\n"
+    "aus 'library_feste_jahreszeit' ersetzen (umbenennen in library.txt).\n\n"
     "Erzeugt mit XP12 DEM Generator (Prototyp ClearScan). Nur fuer private Nutzung/Test.\n")
 summary = {"buildings": len(normal_b), "landmarks": sum(b["landmark"] for b in buildings),
-           "trees": n_trees, "objects": len(placements), "exclusion_cells": len(excl), **stats,
+           "trees": n_trees, "species": species_count, "objects": len(placements), "exclusion_cells": len(excl), **stats,
            "seconds": round(time.time() - t0)}
 (OUT / "stats.json").write_text(json.dumps(summary, indent=1))
 log(summary)
