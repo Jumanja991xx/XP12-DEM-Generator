@@ -1,0 +1,29 @@
+name: DOM-Mesh test pack
+
+# Builds the photogrammetry test scenery (Unter-/Oberschleissheim + EDNX) from the
+# Bavarian DOM-Mesh open data and offers it as a download under "Artifacts".
+on:
+  push:
+    branches: [main]
+    paths: ["packaging/dommesh/**", ".github/workflows/dommesh.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy pillow pyproj shapely requests tifffile imagecodecs
+      - name: Build pack
+        run: python packaging/dommesh/build_dommesh.py out
+      - run: cat out/stats.json && du -sh out/DOMMesh_Schleissheim_EDNX
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DOMMesh_Schleissheim_EDNX
+          path: out/DOMMesh_Schleissheim_EDNX
+          retention-days: 30
+          compression-level: 6
