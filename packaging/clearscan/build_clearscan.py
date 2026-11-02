@@ -684,7 +684,8 @@ for x, y in dom_tiles:
         else np.full(len(E), 10.0)
     crown = np.minimum(np.clip(0.16 * hs + 0.8, 1.2, 7.5), 0.62 * dn + 0.6)
     for i in range(len(E)):
-        trees.append((E[i], N[i], hs[i], species_of(con[i], peaked[i], hs[i], crown[i], lum[i], rgb_t[i], E[i], N[i])))
+        trees.append((E[i], N[i], hs[i], species_of(con[i], peaked[i], hs[i], crown[i], lum[i], rgb_t[i], E[i], N[i]),
+                      lum[i]))
     log(f"Bäume {x},{y}: {len(E)}")
 log("Bäume gesamt", len(trees))
 
@@ -697,19 +698,24 @@ H_EDGES = [3, 7, 10, 13, 16, 20, 25, 40]
 for_defs, for_points = [], {}
 lib = {s: [] for s in TR.SEASONS}
 for sp in TR.NAMES:
-    for hi in range(len(H_EDGES) - 1):
-        lo_h, hi_h = H_EDGES[hi], H_EDGES[hi + 1]
-        name = f"{sp}_{lo_h}_{hi_h}"
-        for season in TR.SEASONS:
-            (FOR_DIR / season / f"{name}.for").write_text(
-                TR.for_text(sp, lo_h, min(hi_h, 38), "trees.png"))
-            lib[season].append((f"clearscan/trees/{name}.for", f"forests/{season}/{name}.for"))
-        for_defs.append(name)
-        for_points[name] = []
-for e, n, h, sp in trees:
+    for v in range(TR.VARIANTS):
+        for hi in range(len(H_EDGES) - 1):
+            lo_h, hi_h = H_EDGES[hi], H_EDGES[hi + 1]
+            name = f"{sp}{v}_{lo_h}_{hi_h}"
+            for season in TR.SEASONS:
+                (FOR_DIR / season / f"{name}.for").write_text(
+                    TR.for_text(sp, v, lo_h, min(hi_h, 38), "trees.png"))
+                lib[season].append((f"clearscan/trees/{name}.for", f"forests/{season}/{name}.for"))
+            for_defs.append(name)
+            for_points[name] = []
+# brightness variant per tree: darker / medium / lighter third of its species in the aerial photo
+lum_by_sp = {sp: np.array([t[4] for t in trees if t[3] == sp]) for sp in TR.NAMES}
+cuts = {sp: (np.percentile(l, [33, 67]) if len(l) else (0, 0)) for sp, l in lum_by_sp.items()}
+for e, n, h, sp, lum in trees:
     hi = int(np.clip(np.searchsorted(H_EDGES, h) - 1, 0, len(H_EDGES) - 2))
+    v = int(np.searchsorted(cuts[sp], lum))
     lon, lat = to_ll.transform(e, n)
-    for_points[f"{sp}_{H_EDGES[hi]}_{H_EDGES[hi + 1]}"].append((lon, lat))
+    for_points[f"{sp}{v}_{H_EDGES[hi]}_{H_EDGES[hi + 1]}"].append((lon, lat))
 for_defs = [f for f in for_defs if for_points[f]]
 head = ["A", "800", "LIBRARY", ""]
 SEASON_NAMES = {"spr": "fruehling", "sum": "sommer", "fal": "herbst", "win": "winter"}
@@ -721,7 +727,8 @@ alt.mkdir(exist_ok=True)
 for season in TR.SEASONS:
     (alt / f"library_{SEASON_NAMES[season]}.txt").write_text("\n".join(
         head + [f"# Feste Jahreszeit: {SEASON_NAMES[season]}"] + [f"EXPORT {v} {r}" for v, r in lib[season]]) + "\n")
-species_count = {sp: sum(len(for_points[f]) for f in for_points if f.startswith(sp + "_")) for sp in TR.NAMES}
+species_count = {sp: sum(len(for_points[f]) for f in for_points if f[:-len(f.split("_", 1)[1]) - 2] == sp)
+                 for sp in TR.NAMES}
 log("Baumarten", species_count)
 
 # --------------------------------------------------------------------------- DSF
